@@ -46,6 +46,22 @@
 #define TELOPT_LINEMODE     34      /* Linemode */
 #define TELOPT_ENVIRON      36      /* Environment variables */
 
+/* TERMINAL-TYPE subnegotiation codes (RFC 1091) */
+#define TTYPE_IS            0       /* Terminal type IS */
+#define TTYPE_SEND          1       /* Send terminal type */
+
+/* LINEMODE subnegotiation codes (RFC 1184) */
+#define LM_MODE             1       /* Linemode MODE */
+#define LM_FORWARDMASK      2       /* Forward mask */
+#define LM_SLC              3       /* Set local characters */
+
+/* LINEMODE MODE bits */
+#define MODE_EDIT           0x01    /* Local editing */
+#define MODE_TRAPSIG        0x02    /* Trap signals */
+#define MODE_ACK            0x04    /* Acknowledge mode change */
+#define MODE_SOFT_TAB       0x08    /* Soft tab */
+#define MODE_LIT_ECHO       0x10    /* Literal echo */
+
 /* Telnet state machine states */
 typedef enum {
     TELNET_STATE_DATA,          /* Normal data */
@@ -77,11 +93,24 @@ typedef struct {
     bool local_options[256];        /* Options we support locally */
     bool remote_options[256];       /* Options remote supports */
 
-    /* Mode flags */
-    bool binary_mode;               /* Binary transmission mode */
-    bool echo_mode;                 /* Echo mode */
-    bool sga_mode;                  /* Suppress go ahead */
+    /* Mode flags (bidirectional - RFC 855 compliant) */
+    bool binary_local;              /* We send binary */
+    bool binary_remote;             /* They send binary */
+    bool echo_local;                /* We echo */
+    bool echo_remote;               /* They echo */
+    bool sga_local;                 /* We suppress GA */
+    bool sga_remote;                /* They suppress GA */
+    bool linemode_active;           /* Linemode option active */
+    bool linemode_edit;             /* Local editing enabled */
+
+    /* Deprecated: kept for compatibility, use bidirectional flags */
+    bool binary_mode;               /* Binary transmission mode (OR of local/remote) */
+    bool echo_mode;                 /* Echo mode (remote echo) */
+    bool sga_mode;                  /* Suppress go ahead (OR of local/remote) */
     bool linemode;                  /* Line mode vs character mode */
+
+    /* Terminal type */
+    char terminal_type[64];         /* Terminal type (e.g., "ANSI", "VT100") */
 } telnet_t;
 
 /* Function prototypes */

@@ -29,6 +29,9 @@ void telnet_init(telnet_t *tn)
     /* Default to line mode until server requests character mode */
     tn->linemode = true;
 
+    /* Set default terminal type */
+    SAFE_STRNCPY(tn->terminal_type, "ANSI", sizeof(tn->terminal_type));
+
     MB_LOG_DEBUG("Telnet initialized");
 }
 
@@ -103,6 +106,12 @@ int telnet_connect(telnet_t *tn, const char *host, int port)
     telnet_send_negotiate(tn, TELNET_WILL, TELOPT_SGA);
     telnet_send_negotiate(tn, TELNET_DO, TELOPT_SGA);
     telnet_send_negotiate(tn, TELNET_DO, TELOPT_ECHO);
+
+    /* Offer TERMINAL-TYPE support (RFC 1091) */
+    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_TTYPE);
+
+    /* Offer LINEMODE support (RFC 1184) - character mode by default */
+    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_LINEMODE);
 
     return SUCCESS;
 }
@@ -201,9 +210,17 @@ static void telnet_update_mode(telnet_t *tn)
 
     old_linemode = tn->linemode;
 
+    /* Update deprecated combined flags for compatibility */
+    tn->binary_mode = tn->binary_local || tn->binary_remote;
+    tn->sga_mode = tn->sga_local || tn->sga_remote;
+    tn->echo_mode = tn->echo_remote;
+
     /* Character mode: Server echoes (WILL ECHO) and SGA enabled
-     * Line mode: Client echoes (WONT ECHO) or no echo negotiation */
-    if (tn->remote_options[TELOPT_ECHO] && tn->remote_options[TELOPT_SGA]) {
+     * Line mode: Client echoes (WONT ECHO) or no echo negotiation
+     * LINEMODE overrides ECHO/SGA detection if active */
+    if (tn->linemode_active) {
+        tn->linemode = tn->linemode_edit;  /* LINEMODE MODE controls */
+    } else if (tn->echo_remote && tn->sga_remote) {
         /* Character mode - server handles echo */
         tn->linemode = false;
         if (old_linemode != tn->linemode) {
@@ -219,7 +236,7 @@ static void telnet_update_mode(telnet_t *tn)
 }
 
 /**
- * Handle received option negotiation
+ * Handle received option negotiation (RFC 855 compliant with loop prevention)
  */
 int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char option)
 {
@@ -227,85 +244,103 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
         return ERROR_INVALID_ARG;
     }
 
-    MB_LOG_DEBUG("Received IAC negotiation: %d %d", command, option);
+    MB_LOG_DEBUG("Received IAC negotiation: cmd=%d opt=%d", command, option);
 
     switch (command) {
         case TELNET_WILL:
-            /* Server will use option */
+            /* Server will use option - only respond if state changes (RFC 855) */
             if (option == TELOPT_BINARY || option == TELOPT_SGA || option == TELOPT_ECHO) {
-                /* Accept these options */
-                tn->remote_options[option] = true;
-                telnet_send_negotiate(tn, TELNET_DO, option);
+                if (!tn->remote_options[option]) {  /* State change check */
+                    tn->remote_options[option] = true;
+                    telnet_send_negotiate(tn, TELNET_DO, option);
 
-                if (option == TELOPT_BINARY) {
-                    tn->binary_mode = true;
-                    MB_LOG_INFO("Binary mode enabled");
-                } else if (option == TELOPT_SGA) {
-                    tn->sga_mode = true;
-                    MB_LOG_INFO("SGA mode enabled");
-                } else if (option == TELOPT_ECHO) {
-                    tn->echo_mode = true;
-                    MB_LOG_INFO("Echo mode enabled");
+                    if (option == TELOPT_BINARY) {
+                        tn->binary_remote = true;
+                        MB_LOG_INFO("Remote BINARY mode enabled");
+                    } else if (option == TELOPT_SGA) {
+                        tn->sga_remote = true;
+                        MB_LOG_INFO("Remote SGA enabled");
+                    } else if (option == TELOPT_ECHO) {
+                        tn->echo_remote = true;
+                        MB_LOG_INFO("Remote ECHO enabled");
+                    }
                 }
             } else {
-                /* Reject other options */
-                telnet_send_negotiate(tn, TELNET_DONT, option);
+                /* Reject unsupported options (only if not already rejected) */
+                if (tn->remote_options[option]) {
+                    tn->remote_options[option] = false;
+                    telnet_send_negotiate(tn, TELNET_DONT, option);
+                }
             }
-            /* Update line/character mode after option change */
             telnet_update_mode(tn);
             break;
 
         case TELNET_WONT:
-            /* Server won't use option */
-            tn->remote_options[option] = false;
-            /* Acknowledge with DONT */
-            telnet_send_negotiate(tn, TELNET_DONT, option);
+            /* Server won't use option - only respond if state changes */
+            if (tn->remote_options[option]) {
+                tn->remote_options[option] = false;
+                telnet_send_negotiate(tn, TELNET_DONT, option);
 
-            if (option == TELOPT_BINARY) {
-                tn->binary_mode = false;
-            } else if (option == TELOPT_SGA) {
-                tn->sga_mode = false;
-            } else if (option == TELOPT_ECHO) {
-                tn->echo_mode = false;
+                if (option == TELOPT_BINARY) {
+                    tn->binary_remote = false;
+                } else if (option == TELOPT_SGA) {
+                    tn->sga_remote = false;
+                } else if (option == TELOPT_ECHO) {
+                    tn->echo_remote = false;
+                } else if (option == TELOPT_LINEMODE) {
+                    tn->linemode_active = false;
+                }
             }
-            /* Update line/character mode after option change */
             telnet_update_mode(tn);
             break;
 
         case TELNET_DO:
-            /* Server wants us to use option */
-            if (option == TELOPT_BINARY || option == TELOPT_SGA) {
-                /* Accept these options */
-                tn->local_options[option] = true;
-                telnet_send_negotiate(tn, TELNET_WILL, option);
+            /* Server wants us to use option - only respond if state changes */
+            if (option == TELOPT_BINARY || option == TELOPT_SGA ||
+                option == TELOPT_TTYPE || option == TELOPT_LINEMODE) {
+                if (!tn->local_options[option]) {  /* State change check */
+                    tn->local_options[option] = true;
+                    telnet_send_negotiate(tn, TELNET_WILL, option);
 
-                if (option == TELOPT_BINARY) {
-                    tn->binary_mode = true;
-                    MB_LOG_INFO("Binary mode enabled (local)");
-                } else if (option == TELOPT_SGA) {
-                    tn->sga_mode = true;
-                    MB_LOG_INFO("SGA mode enabled (local)");
+                    if (option == TELOPT_BINARY) {
+                        tn->binary_local = true;
+                        MB_LOG_INFO("Local BINARY mode enabled");
+                    } else if (option == TELOPT_SGA) {
+                        tn->sga_local = true;
+                        MB_LOG_INFO("Local SGA enabled");
+                    } else if (option == TELOPT_TTYPE) {
+                        MB_LOG_INFO("TERMINAL-TYPE negotiation accepted");
+                        /* Server will send SB TTYPE SEND to request type */
+                    } else if (option == TELOPT_LINEMODE) {
+                        tn->linemode_active = true;
+                        MB_LOG_INFO("LINEMODE negotiation accepted");
+                        /* Server may send MODE subnegotiation */
+                    }
                 }
             } else {
-                /* Reject other options */
-                telnet_send_negotiate(tn, TELNET_WONT, option);
+                /* Reject unsupported options (only if not already rejected) */
+                if (tn->local_options[option]) {
+                    tn->local_options[option] = false;
+                    telnet_send_negotiate(tn, TELNET_WONT, option);
+                }
             }
-            /* Update line/character mode after option change */
             telnet_update_mode(tn);
             break;
 
         case TELNET_DONT:
-            /* Server doesn't want us to use option */
-            tn->local_options[option] = false;
-            /* Acknowledge with WONT */
-            telnet_send_negotiate(tn, TELNET_WONT, option);
+            /* Server doesn't want us to use option - only respond if state changes */
+            if (tn->local_options[option]) {
+                tn->local_options[option] = false;
+                telnet_send_negotiate(tn, TELNET_WONT, option);
 
-            if (option == TELOPT_BINARY) {
-                tn->binary_mode = false;
-            } else if (option == TELOPT_SGA) {
-                tn->sga_mode = false;
+                if (option == TELOPT_BINARY) {
+                    tn->binary_local = false;
+                } else if (option == TELOPT_SGA) {
+                    tn->sga_local = false;
+                } else if (option == TELOPT_LINEMODE) {
+                    tn->linemode_active = false;
+                }
             }
-            /* Update line/character mode after option change */
             telnet_update_mode(tn);
             break;
 
@@ -318,7 +353,48 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
 }
 
 /**
- * Handle subnegotiation
+ * Send subnegotiation (helper function)
+ */
+static int telnet_send_subnegotiation(telnet_t *tn, const unsigned char *data, size_t len)
+{
+    unsigned char buf[BUFFER_SIZE];
+    size_t pos = 0;
+
+    if (tn == NULL || data == NULL || len == 0 || tn->fd < 0) {
+        return ERROR_INVALID_ARG;
+    }
+
+    /* Build: IAC SB <data...> IAC SE */
+    buf[pos++] = TELNET_IAC;
+    buf[pos++] = TELNET_SB;
+
+    for (size_t i = 0; i < len && pos < sizeof(buf) - 2; i++) {
+        /* Escape IAC in subnegotiation data (RFC 854) */
+        if (data[i] == TELNET_IAC) {
+            buf[pos++] = TELNET_IAC;
+            buf[pos++] = TELNET_IAC;
+        } else {
+            buf[pos++] = data[i];
+        }
+    }
+
+    buf[pos++] = TELNET_IAC;
+    buf[pos++] = TELNET_SE;
+
+    MB_LOG_DEBUG("Sending subnegotiation: %zu bytes", pos);
+
+    if (send(tn->fd, buf, pos, 0) < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            MB_LOG_ERROR("Failed to send subnegotiation: %s", strerror(errno));
+            return ERROR_IO;
+        }
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Handle subnegotiation (RFC 1091 TERMINAL-TYPE, RFC 1184 LINEMODE)
  */
 int telnet_handle_subnegotiation(telnet_t *tn)
 {
@@ -330,9 +406,67 @@ int telnet_handle_subnegotiation(telnet_t *tn)
 
     MB_LOG_DEBUG("Received subnegotiation for option %d, length %zu", (int)option, tn->sb_len);
 
-    /* Handle specific subnegotiations if needed */
-    /* For now, we just log and ignore */
-    (void)option;  /* Mark as intentionally unused for now */
+    switch (option) {
+        case TELOPT_TTYPE:
+            /* TERMINAL-TYPE subnegotiation (RFC 1091) */
+            if (tn->sb_len >= 2 && tn->sb_buffer[1] == TTYPE_SEND) {
+                /* Server requests terminal type - send IS response */
+                unsigned char response[68];  /* 1 (option) + 1 (IS) + 64 (terminal type) + 2 safety */
+                size_t term_len = strlen(tn->terminal_type);
+
+                response[0] = TELOPT_TTYPE;
+                response[1] = TTYPE_IS;
+                memcpy(&response[2], tn->terminal_type, term_len);
+
+                MB_LOG_INFO("Sending TERMINAL-TYPE IS %s", tn->terminal_type);
+                telnet_send_subnegotiation(tn, response, 2 + term_len);
+            }
+            break;
+
+        case TELOPT_LINEMODE:
+            /* LINEMODE subnegotiation (RFC 1184) */
+            if (tn->sb_len >= 2 && tn->sb_buffer[1] == LM_MODE) {
+                /* MODE subnegotiation */
+                if (tn->sb_len >= 3) {
+                    unsigned char mode = tn->sb_buffer[2];
+                    bool old_edit = tn->linemode_edit;
+
+                    tn->linemode_edit = (mode & MODE_EDIT) != 0;
+
+                    MB_LOG_INFO("LINEMODE MODE: EDIT=%s TRAPSIG=%s",
+                               (mode & MODE_EDIT) ? "yes" : "no",
+                               (mode & MODE_TRAPSIG) ? "yes" : "no");
+
+                    /* Send ACK if MODE_ACK bit is set (RFC 1184 mode synchronization) */
+                    if (mode & MODE_ACK) {
+                        unsigned char response[3];
+                        response[0] = TELOPT_LINEMODE;
+                        response[1] = LM_MODE;
+                        response[2] = mode;  /* Echo back the same mode */
+
+                        MB_LOG_DEBUG("Sending LINEMODE MODE ACK");
+                        telnet_send_subnegotiation(tn, response, 3);
+                    }
+
+                    /* Update mode if edit flag changed */
+                    if (old_edit != tn->linemode_edit) {
+                        telnet_update_mode(tn);
+                    }
+                }
+            } else if (tn->sb_len >= 2 && tn->sb_buffer[1] == LM_FORWARDMASK) {
+                /* FORWARDMASK - acknowledge but don't implement for now */
+                MB_LOG_DEBUG("Received LINEMODE FORWARDMASK (not implemented)");
+            } else if (tn->sb_len >= 2 && tn->sb_buffer[1] == LM_SLC) {
+                /* SLC (Set Local Characters) - acknowledge but don't implement for now */
+                MB_LOG_DEBUG("Received LINEMODE SLC (not implemented)");
+            }
+            break;
+
+        default:
+            /* Unknown option - just log and ignore */
+            MB_LOG_DEBUG("Ignoring subnegotiation for unsupported option %d", option);
+            break;
+    }
 
     return SUCCESS;
 }
@@ -384,9 +518,51 @@ int telnet_process_input(telnet_t *tn, const unsigned char *input, size_t input_
                 } else if (c == TELNET_SB) {
                     tn->state = TELNET_STATE_SB;
                     tn->sb_len = 0;
+                } else if (c == TELNET_GA) {
+                    /* Go Ahead - silently ignore in character mode (RFC 858) */
+                    MB_LOG_DEBUG("Received IAC GA (ignored)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_NOP) {
+                    /* No Operation - silently ignore (RFC 854) */
+                    MB_LOG_DEBUG("Received IAC NOP");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_AYT) {
+                    /* Are You There - respond with confirmation (RFC 854) */
+                    MB_LOG_DEBUG("Received IAC AYT");
+                    const char *response = "\r\n[ModemBridge: Yes, I'm here]\r\n";
+                    telnet_send(tn, response, strlen(response));
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_IP) {
+                    /* Interrupt Process - log but don't act (RFC 854) */
+                    MB_LOG_INFO("Received IAC IP (Interrupt Process)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_AO) {
+                    /* Abort Output - log but don't act (RFC 854) */
+                    MB_LOG_INFO("Received IAC AO (Abort Output)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_BREAK) {
+                    /* Break - log but don't act (RFC 854) */
+                    MB_LOG_INFO("Received IAC BREAK");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_EL) {
+                    /* Erase Line - log but don't act (RFC 854) */
+                    MB_LOG_DEBUG("Received IAC EL (Erase Line)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_EC) {
+                    /* Erase Character - log but don't act (RFC 854) */
+                    MB_LOG_DEBUG("Received IAC EC (Erase Character)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_DM) {
+                    /* Data Mark - marks end of urgent data (RFC 854) */
+                    MB_LOG_DEBUG("Received IAC DM (Data Mark)");
+                    tn->state = TELNET_STATE_DATA;
+                } else if (c == TELNET_EOR) {
+                    /* End of Record - log but don't act (RFC 885) */
+                    MB_LOG_DEBUG("Received IAC EOR (End of Record)");
+                    tn->state = TELNET_STATE_DATA;
                 } else {
-                    /* Other IAC commands - just log */
-                    MB_LOG_DEBUG("Received IAC command: %d", c);
+                    /* Unknown IAC command - log and ignore */
+                    MB_LOG_WARNING("Received unknown IAC command: %d", c);
                     tn->state = TELNET_STATE_DATA;
                 }
                 break;
