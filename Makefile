@@ -17,7 +17,8 @@ OBJ_DIR = $(BUILD_DIR)/obj
 TARGET = $(BUILD_DIR)/modembridge
 
 # Source files
-SOURCES = $(wildcard $(SRC_DIR)/*.c)
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/bridge.c $(SRC_DIR)/telnet.c $(SRC_DIR)/serial.c \
+          $(SRC_DIR)/modem.c $(SRC_DIR)/config.c $(SRC_DIR)/common.c
 OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
 
 # Header dependencies
@@ -40,7 +41,7 @@ $(OBJ_DIR):
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-# Link
+# Link modembridge
 $(TARGET): $(BUILD_DIR) $(OBJ_DIR) $(OBJECTS)
 	@echo "Linking $(TARGET)..."
 	$(CC) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $(TARGET)
@@ -99,12 +100,12 @@ help:
 	@echo "ModemBridge Makefile"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all       - Build the project (default)"
+	@echo "  all       - Build modembridge (default)"
 	@echo "  clean     - Remove build artifacts"
 	@echo "  debug     - Build with debug symbols"
 	@echo "  install   - Install to system (requires root)"
 	@echo "  uninstall - Remove from system (requires root)"
-	@echo "  run       - Build and run with default config"
+	@echo "  run       - Build and run modembridge with default config"
 	@echo "  show      - Show Makefile variables"
 	@echo "  help      - Show this help message"
 	@echo ""
