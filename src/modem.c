@@ -390,10 +390,7 @@ int modem_process_command(modem_t *modem, const char *command)
         if (*p == 'A' && *(p + 1) != 'T') {
             MB_LOG_INFO("AT command: ATA (Answer)");
             ret = modem_answer(modem);
-            if (ret == SUCCESS) {
-                /* Answer will be handled by bridge connecting to telnet */
-                return SUCCESS;
-            }
+            /* ATA command sends OK first, then connection will be handled by bridge */
             p++;
         }
         /* ATD - Dial (not implemented, just return OK) */

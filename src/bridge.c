@@ -7,7 +7,6 @@
 #include <time.h>
 
 /* Forward declarations */
-static int bridge_transfer_serial_to_telnet(bridge_ctx_t *ctx);
 static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx);
 
 /**
@@ -359,9 +358,6 @@ int bridge_start(bridge_ctx_t *ctx)
 
     MB_LOG_INFO("Bridge started, waiting for modem connection");
 
-    /* Send initial modem response */
-    modem_send_response(&ctx->modem, MODEM_RESP_OK);
-
     return SUCCESS;
 }
 
@@ -501,6 +497,9 @@ int bridge_handle_telnet_disconnect(bridge_ctx_t *ctx)
 int bridge_process_serial_data(bridge_ctx_t *ctx)
 {
     unsigned char buf[BUFFER_SIZE];
+    unsigned char filtered_buf[BUFFER_SIZE];
+    unsigned char telnet_buf[BUFFER_SIZE * 2];
+    size_t filtered_len, telnet_len;
     ssize_t n;
 
     if (ctx == NULL) {
@@ -522,72 +521,37 @@ int bridge_process_serial_data(bridge_ctx_t *ctx)
     /* Process through modem layer */
     if (!modem_is_online(&ctx->modem)) {
         /* In command mode - let modem process the input */
-        ssize_t consumed = modem_process_input(&ctx->modem, (char *)buf, n);
+        modem_process_input(&ctx->modem, (char *)buf, n);
 
-        /* Check if modem answered (ATA command) */
+        /* Check for state changes */
         if (modem_get_state(&ctx->modem) == MODEM_STATE_CONNECTING) {
             bridge_handle_modem_connect(ctx);
-        }
-
-        if (consumed < 0) {
-            return ERROR_GENERAL;
+        } else if (modem_get_state(&ctx->modem) == MODEM_STATE_DISCONNECTED) {
+            bridge_handle_modem_disconnect(ctx);
         }
 
         return SUCCESS;
     }
 
-    /* Online mode - bridge data to telnet */
-    /* Check for escape sequence */
+    /* Online mode - check for escape sequence and forward data */
     ssize_t consumed = modem_process_input(&ctx->modem, (char *)buf, n);
     if (!modem_is_online(&ctx->modem)) {
         /* Modem went offline (escape sequence detected) */
         return SUCCESS;
     }
 
-    /* Transfer data to telnet */
-    if (telnet_is_connected(&ctx->telnet) && consumed > 0) {
-        bridge_transfer_serial_to_telnet(ctx);
+    if (consumed <= 0) {
+        /* No data to transfer */
+        return SUCCESS;
     }
 
-    return SUCCESS;
-}
-
-/**
- * Process data from telnet
- */
-int bridge_process_telnet_data(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL) {
-        return ERROR_INVALID_ARG;
-    }
-
-    /* Transfer data from telnet to serial */
-    if (telnet_is_connected(&ctx->telnet) && modem_is_online(&ctx->modem)) {
-        return bridge_transfer_telnet_to_serial(ctx);
-    }
-
-    return SUCCESS;
-}
-
-/**
- * Transfer data from serial to telnet
- */
-static int bridge_transfer_serial_to_telnet(bridge_ctx_t *ctx)
-{
-    unsigned char serial_buf[BUFFER_SIZE];
-    unsigned char filtered_buf[BUFFER_SIZE];
-    unsigned char telnet_buf[BUFFER_SIZE * 2];  /* IAC escaping can double size */
-    size_t filtered_len, telnet_len;
-    ssize_t n;
-
-    /* Read from serial */
-    n = serial_read(&ctx->serial, serial_buf, sizeof(serial_buf));
-    if (n <= 0) {
+    /* Transfer actual data to telnet */
+    if (!telnet_is_connected(&ctx->telnet)) {
         return SUCCESS;
     }
 
     /* Filter ANSI sequences */
-    ansi_filter_modem_to_telnet(serial_buf, n, filtered_buf, sizeof(filtered_buf),
+    ansi_filter_modem_to_telnet(buf, consumed, filtered_buf, sizeof(filtered_buf),
                                 &filtered_len, &ctx->ansi_filter_state);
 
     if (filtered_len == 0) {
@@ -606,6 +570,23 @@ static int bridge_transfer_serial_to_telnet(bridge_ctx_t *ctx)
     ssize_t sent = telnet_send(&ctx->telnet, telnet_buf, telnet_len);
     if (sent > 0) {
         ctx->bytes_serial_to_telnet += sent;
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Process data from telnet
+ */
+int bridge_process_telnet_data(bridge_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return ERROR_INVALID_ARG;
+    }
+
+    /* Transfer data from telnet to serial */
+    if (telnet_is_connected(&ctx->telnet) && modem_is_online(&ctx->modem)) {
+        return bridge_transfer_telnet_to_serial(ctx);
     }
 
     return SUCCESS;
