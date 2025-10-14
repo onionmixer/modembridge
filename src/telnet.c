@@ -283,6 +283,7 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
 
                 if (option == TELOPT_BINARY) {
                     tn->binary_remote = false;
+                    MB_LOG_WARNING("Server rejected BINARY mode - multibyte characters (UTF-8, EUC-KR) may be corrupted!");
                 } else if (option == TELOPT_SGA) {
                     tn->sga_remote = false;
                 } else if (option == TELOPT_ECHO) {
@@ -335,6 +336,7 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
 
                 if (option == TELOPT_BINARY) {
                     tn->binary_local = false;
+                    MB_LOG_WARNING("Server rejected local BINARY mode - multibyte characters may be corrupted on send!");
                 } else if (option == TELOPT_SGA) {
                     tn->sga_local = false;
                 } else if (option == TELOPT_LINEMODE) {
@@ -496,6 +498,13 @@ int telnet_process_input(telnet_t *tn, const unsigned char *input, size_t input_
                     /* Regular data */
                     if (out_pos < output_size) {
                         output[out_pos++] = c;
+                    } else {
+                        /* Buffer full - log warning once */
+                        static bool overflow_warned = false;
+                        if (!overflow_warned) {
+                            MB_LOG_WARNING("Telnet input buffer full - data may be truncated (multibyte chars may break)");
+                            overflow_warned = true;
+                        }
                     }
                 }
                 break;
@@ -649,7 +658,8 @@ int telnet_prepare_output(telnet_t *tn, const unsigned char *input, size_t input
 
     *output_len = 0;
 
-    for (size_t i = 0; i < input_len; i++) {
+    size_t i;
+    for (i = 0; i < input_len; i++) {
         unsigned char c = input[i];
 
         if (c == TELNET_IAC) {
@@ -673,6 +683,12 @@ int telnet_prepare_output(telnet_t *tn, const unsigned char *input, size_t input
     }
 
     *output_len = out_pos;
+
+    /* Warn if not all input was processed */
+    if (i < input_len) {
+        MB_LOG_WARNING("Telnet output buffer full - %zu of %zu bytes not processed (multibyte chars may break)",
+                      input_len - i, input_len);
+    }
 
     if (out_pos > 0) {
         MB_LOG_DEBUG("Telnet prepared %zu bytes -> %zu bytes", input_len, out_pos);
