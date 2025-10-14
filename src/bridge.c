@@ -221,6 +221,13 @@ int ansi_filter_modem_to_telnet(const unsigned char *input, size_t input_len,
                     /* Normal character - pass through */
                     if (out_pos < output_size) {
                         output[out_pos++] = c;
+                    } else {
+                        /* Buffer full - log warning once */
+                        static bool overflow_warned = false;
+                        if (!overflow_warned) {
+                            MB_LOG_WARNING("ANSI filter output buffer full - data truncated (multibyte chars may break)");
+                            overflow_warned = true;
+                        }
                     }
                 }
                 break;
