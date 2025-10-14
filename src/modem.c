@@ -366,7 +366,7 @@ int modem_process_command(modem_t *modem, const char *command)
 
     /* Convert to uppercase for easier parsing */
     for (size_t i = 0; i < sizeof(cmd_upper) - 1 && command[i]; i++) {
-        cmd_upper[i] = toupper(command[i]);
+        cmd_upper[i] = toupper((unsigned char)command[i]);
         cmd_upper[i + 1] = '\0';
     }
 
@@ -621,11 +621,11 @@ ssize_t modem_process_input(modem_t *modem, const char *data, size_t len)
 
             /* Check for AT prefix */
             if (modem->cmd_len >= 2 &&
-                toupper(modem->cmd_buffer[0]) == 'A' &&
-                toupper(modem->cmd_buffer[1]) == 'T') {
+                toupper((unsigned char)modem->cmd_buffer[0]) == 'A' &&
+                toupper((unsigned char)modem->cmd_buffer[1]) == 'T') {
                 /* Process AT command (skip "AT" prefix) */
                 modem_process_command(modem, modem->cmd_buffer + 2);
-            } else if (modem->cmd_len == 1 && toupper(modem->cmd_buffer[0]) == 'A') {
+            } else if (modem->cmd_len == 1 && toupper((unsigned char)modem->cmd_buffer[0]) == 'A') {
                 /* Just "A" - repeat last command or answer */
                 modem_answer(modem);
             } else {
