@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Executable
+modembridge
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+*.log
+
+# PID files
+*.pid
+
+# Core dumps
+core
+core.*
+
+# Backup files
+*.bak
+*~
+
+# Configuration files with secrets (if any)
+*.secret
+.env

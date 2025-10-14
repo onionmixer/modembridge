@@ -1,0 +1,277 @@
+ModemBridge 프로젝트 개발 계획
+=====================================
+
+프로젝트 개요:
+- USB Serial을 통한 Dialup Modem과 Telnet 서버를 연결하는 Bridge 서버
+- 개발 언어: C
+- 최소 요구사항: Ubuntu 22.04 LTS
+
+
+Phase 1: 프로젝트 기초 구조 설정
+---------------------------------
+[1-1] 디렉토리 구조 생성
+      - src/        : 소스 코드
+      - include/    : 헤더 파일
+      - build/      : 빌드 결과물
+      - docs/       : 문서
+
+[1-2] 빌드 시스템 구축
+      - Makefile 작성
+      - 컴파일 옵션 설정 (-Wall, -Wextra, -O2)
+      - 의존성 관리
+
+[1-3] 기본 헤더 파일 작성
+      - common.h    : 공통 정의 및 매크로
+      - config.h    : 설정 관련 구조체 및 함수
+      - serial.h    : Serial 통신 관련
+      - modem.h     : Modem 제어 관련
+      - telnet.h    : Telnet 클라이언트 관련
+      - bridge.h    : 브릿징 로직 관련
+
+
+Phase 2: 설정 파일 파서 구현
+---------------------------
+[2-1] 설정 구조체 정의
+      - COM port 설정
+      - Serial 통신 파라미터 (BAUDRATE, PARITY, DATA/STOP bits)
+      - Flow control 설정
+      - Telnet 서버 정보
+
+[2-2] 설정 파일 파서 구현 (config.c)
+      - modembridge.conf 읽기
+      - 키=값 형식 파싱
+      - 주석 처리 (#)
+      - 기본값 설정
+      - 설정값 유효성 검증
+
+
+Phase 3: Serial Port 통신 모듈 구현
+----------------------------------
+[3-1] Serial Port 초기화 (serial.c)
+      - termios 구조체를 이용한 port 설정
+      - BAUDRATE 설정 (가변 지원)
+      - Parity, Data bits, Stop bits 설정
+      - Flow control 설정 (NONE, XON/XOFF, RTS/CTS, BOTH)
+      - Non-blocking I/O 설정
+
+[3-2] Serial Port 읽기/쓰기 함수
+      - 버퍼링 처리
+      - 에러 핸들링
+      - Timeout 처리
+
+
+Phase 4: Modem 제어 모듈 구현
+----------------------------
+[4-1] Hayes AT 명령어 처리 (modem.c)
+      - AT 명령어 인식 및 응답
+      - ATA (Answer) 명령 처리
+      - ATH (Hang up) 명령 처리
+      - ATZ (Reset) 명령 처리
+      - ATI (Information) 명령 처리
+      - ATE (Echo) 설정
+
+[4-2] Modem Handshake 구현
+      - RING 신호 전송
+      - CONNECT 응답
+      - Client BAUDRATE 감지 및 협상
+      - Carrier 신호 관리 (DCD)
+
+[4-3] Connection 상태 관리
+      - 연결 상태 추적
+      - 비정상 종료 감지 (Carrier loss)
+      - 정상 종료 처리 (ATH, +++ATH)
+
+
+Phase 5: Telnet 클라이언트 모듈 구현
+-----------------------------------
+[5-1] Telnet 연결 구현 (telnet.c)
+      - TCP Socket 연결
+      - 재연결 로직
+      - 연결 타임아웃 처리
+
+[5-2] Telnet 프로토콜 처리
+      - IAC (Interpret As Command) 처리
+      - DO/DONT/WILL/WONT negotiation
+      - Line mode / Character mode 전환 지원
+      - ECHO 옵션 처리
+      - Binary mode 지원 (multibyte 전송)
+
+[5-3] Telnet 제어 코드 필터링
+      - Client → Telnet: IAC 이스케이프 (0xFF → 0xFF 0xFF)
+      - Telnet → Client: IAC 명령어 처리 및 필터링
+      - Modem client에게는 제어코드 미전송
+
+
+Phase 6: ANSI 제어코드 처리
+--------------------------
+[6-1] ANSI 이스케이프 시퀀스 파서 (ansi.c)
+      - ESC [ 시퀀스 인식
+      - CSI (Control Sequence Introducer) 처리
+      - 커서 이동, 색상, 화면 제어 등
+
+[6-2] 양방향 ANSI 처리
+      - Telnet → Client: ANSI 코드 그대로 전송
+      - Client → Telnet: ANSI 코드 필터링
+        (커서 이동 등의 제어코드는 제거하고 데이터만 전송)
+
+
+Phase 7: 데이터 브릿징 엔진 구현
+-------------------------------
+[7-1] I/O 멀티플렉싱 (bridge.c)
+      - select() 또는 epoll() 사용
+      - Serial port와 Telnet socket 동시 모니터링
+      - 이벤트 기반 데이터 전송
+
+[7-2] 양방향 데이터 전송
+      - Serial → Telnet 파이프라인
+        · Modem 프로토콜 처리
+        · ANSI 필터링 (Client → Telnet)
+        · IAC 이스케이프
+      - Telnet → Serial 파이프라인
+        · Telnet 프로토콜 처리
+        · ANSI 코드 전송
+        · Multibyte 문자 무결성 보장
+
+[7-3] 버퍼 관리
+      - 순환 버퍼 구현
+      - Flow control 처리
+      - 버퍼 오버플로우 방지
+
+[7-4] Multibyte 문자 처리
+      - UTF-8/EUC-KR 등 멀티바이트 경계 인식
+      - 불완전한 멀티바이트 시퀀스 버퍼링
+      - 문자 누락 방지
+
+
+Phase 8: 연결 종료 처리
+----------------------
+[8-1] Modem 연결 종료 시나리오
+      - Client 정상 종료 (ATH 명령)
+      - Client 비정상 종료 (Carrier loss)
+      - 종료 시 Telnet 연결도 종료
+
+[8-2] Telnet 연결 종료 시나리오
+      - Telnet 서버 종료
+      - 네트워크 에러
+      - 종료 시 Modem 연결 해제 (NO CARRIER 전송)
+
+[8-3] 리소스 정리
+      - File descriptor 닫기
+      - 메모리 해제
+      - 상태 초기화
+
+
+Phase 9: 메인 데몬 프로그램 구현
+-------------------------------
+[9-1] Daemon 기본 기능 (main.c)
+      - Daemonize 처리
+      - PID 파일 관리
+      - Signal 처리 (SIGTERM, SIGINT, SIGHUP)
+      - 로그 시스템 (syslog)
+
+[9-2] 초기화 및 메인 루프
+      - 설정 파일 로드
+      - Serial port 초기화
+      - Modem 대기 모드
+      - 연결 수신 및 처리
+      - 재시작 로직
+
+[9-3] 에러 처리 및 복구
+      - 각 단계별 에러 핸들링
+      - 자동 재연결
+      - Graceful shutdown
+
+
+Phase 10: 테스트 및 디버깅
+-------------------------
+[10-1] 단위 테스트
+       - 각 모듈별 독립 테스트
+       - 설정 파서 테스트
+       - ANSI 필터 테스트
+       - Telnet 프로토콜 테스트
+
+[10-2] 통합 테스트
+       - 실제 Modem 연결 테스트
+       - 다양한 BAUDRATE 테스트
+       - 장시간 안정성 테스트
+       - 비정상 종료 시나리오 테스트
+
+[10-3] 디버깅 모드
+       - Verbose 로그 옵션
+       - 데이터 덤프 기능
+       - 상태 모니터링
+
+
+Phase 11: 문서화 및 배포
+-----------------------
+[11-1] 사용자 문서
+       - README.md 작성
+       - 설치 가이드
+       - 설정 파일 예제
+       - 트러블슈팅 가이드
+
+[11-2] 개발자 문서
+       - 코드 주석
+       - API 문서
+       - 아키텍처 설명
+
+[11-3] 배포 준비
+       - 설치 스크립트
+       - Systemd service 파일
+       - 로그 로테이션 설정
+
+
+주요 기술 고려사항:
+==================
+1. Serial Port 프로그래밍
+   - termios API 사용
+   - Non-blocking I/O
+   - Flow control 구현
+
+2. Telnet 프로토콜
+   - RFC 854 (Telnet Protocol)
+   - RFC 857 (Echo Option)
+   - RFC 858 (Suppress Go Ahead)
+   - RFC 1184 (Linemode Option)
+
+3. 문자 인코딩
+   - Multibyte 문자 경계 처리
+   - UTF-8/EUC-KR 등 지원
+
+4. 동시성
+   - select/epoll을 이용한 I/O 멀티플렉싱
+   - Non-blocking I/O
+
+5. 안정성
+   - 메모리 누수 방지
+   - 리소스 정리
+   - 에러 복구
+
+
+필요 라이브러리:
+==============
+- 표준 C 라이브러리 (glibc)
+- POSIX API (termios, sockets)
+- 추가 의존성 없음 (순수 C로 구현)
+
+
+개발 우선순위:
+=============
+Phase 1-2: 기초 설정 (1-2일)
+Phase 3-4: Serial/Modem 통신 (3-5일)
+Phase 5: Telnet 클라이언트 (2-3일)
+Phase 6: ANSI 처리 (1-2일)
+Phase 7: 브릿징 엔진 (3-4일)
+Phase 8: 종료 처리 (1-2일)
+Phase 9: 메인 데몬 (2-3일)
+Phase 10: 테스트 (3-5일)
+Phase 11: 문서화 (1-2일)
+
+총 예상 기간: 17-28일
+
+
+다음 단계:
+=========
+1. Phase 1 시작: 프로젝트 구조 생성
+2. Makefile 작성
+3. 기본 헤더 파일 골격 작성
