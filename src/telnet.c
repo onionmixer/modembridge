@@ -26,6 +26,9 @@ void telnet_init(telnet_t *tn)
     tn->local_options[TELOPT_BINARY] = true;
     tn->local_options[TELOPT_SGA] = true;
 
+    /* Default to line mode until server requests character mode */
+    tn->linemode = true;
+
     MB_LOG_DEBUG("Telnet initialized");
 }
 
@@ -99,6 +102,7 @@ int telnet_connect(telnet_t *tn, const char *host, int port)
     telnet_send_negotiate(tn, TELNET_WILL, TELOPT_BINARY);
     telnet_send_negotiate(tn, TELNET_WILL, TELOPT_SGA);
     telnet_send_negotiate(tn, TELNET_DO, TELOPT_SGA);
+    telnet_send_negotiate(tn, TELNET_DO, TELOPT_ECHO);
 
     return SUCCESS;
 }
@@ -185,6 +189,36 @@ int telnet_send_negotiate(telnet_t *tn, unsigned char command, unsigned char opt
 }
 
 /**
+ * Update line mode vs character mode based on current options
+ */
+static void telnet_update_mode(telnet_t *tn)
+{
+    bool old_linemode;
+
+    if (tn == NULL) {
+        return;
+    }
+
+    old_linemode = tn->linemode;
+
+    /* Character mode: Server echoes (WILL ECHO) and SGA enabled
+     * Line mode: Client echoes (WONT ECHO) or no echo negotiation */
+    if (tn->remote_options[TELOPT_ECHO] && tn->remote_options[TELOPT_SGA]) {
+        /* Character mode - server handles echo */
+        tn->linemode = false;
+        if (old_linemode != tn->linemode) {
+            MB_LOG_INFO("Telnet mode: CHARACTER MODE (server echo, SGA enabled)");
+        }
+    } else {
+        /* Line mode - client handles echo */
+        tn->linemode = true;
+        if (old_linemode != tn->linemode) {
+            MB_LOG_INFO("Telnet mode: LINE MODE (client echo)");
+        }
+    }
+}
+
+/**
  * Handle received option negotiation
  */
 int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char option)
@@ -217,6 +251,8 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
                 /* Reject other options */
                 telnet_send_negotiate(tn, TELNET_DONT, option);
             }
+            /* Update line/character mode after option change */
+            telnet_update_mode(tn);
             break;
 
         case TELNET_WONT:
@@ -232,6 +268,8 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
             } else if (option == TELOPT_ECHO) {
                 tn->echo_mode = false;
             }
+            /* Update line/character mode after option change */
+            telnet_update_mode(tn);
             break;
 
         case TELNET_DO:
@@ -252,6 +290,8 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
                 /* Reject other options */
                 telnet_send_negotiate(tn, TELNET_WONT, option);
             }
+            /* Update line/character mode after option change */
+            telnet_update_mode(tn);
             break;
 
         case TELNET_DONT:
@@ -265,6 +305,8 @@ int telnet_handle_negotiate(telnet_t *tn, unsigned char command, unsigned char o
             } else if (option == TELOPT_SGA) {
                 tn->sga_mode = false;
             }
+            /* Update line/character mode after option change */
+            telnet_update_mode(tn);
             break;
 
         default:

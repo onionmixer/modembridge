@@ -8,6 +8,7 @@
 
 /* Forward declarations */
 static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx);
+static void bridge_sync_echo_mode(bridge_ctx_t *ctx);
 
 /**
  * Initialize circular buffer
@@ -418,6 +419,11 @@ int bridge_handle_modem_connect(bridge_ctx_t *ctx)
     /* Go online */
     modem_go_online(&ctx->modem);
 
+    /* Synchronize echo settings between modem and telnet
+     * Note: Telnet option negotiation happens asynchronously,
+     * so echo mode will be updated as negotiations complete */
+    bridge_sync_echo_mode(ctx);
+
     /* Send CONNECT message */
     modem_send_connect(&ctx->modem, ctx->config->baudrate_value);
 
@@ -427,6 +433,28 @@ int bridge_handle_modem_connect(bridge_ctx_t *ctx)
     MB_LOG_INFO("Bridge connection established");
 
     return SUCCESS;
+}
+
+/**
+ * Synchronize modem echo with telnet echo mode
+ */
+static void bridge_sync_echo_mode(bridge_ctx_t *ctx)
+{
+    if (ctx == NULL || !telnet_is_connected(&ctx->telnet)) {
+        return;
+    }
+
+    /* If server will echo, disable modem local echo to prevent double echo */
+    if (ctx->telnet.remote_options[TELOPT_ECHO]) {
+        if (ctx->modem.settings.echo) {
+            MB_LOG_INFO("Server WILL ECHO - disabling modem local echo to prevent double echo");
+            ctx->modem.settings.echo = false;
+        }
+    }
+    /* If server won't echo, keep modem echo setting (from ATE command) */
+    else {
+        MB_LOG_INFO("Server WONT ECHO - using modem echo setting (ATE command)");
+    }
 }
 
 /**
