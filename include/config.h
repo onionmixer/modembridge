@@ -29,7 +29,7 @@ typedef enum {
 /* Configuration structure */
 typedef struct {
     /* Serial port settings */
-    char comport[SMALL_BUFFER_SIZE];
+    char serial_port[SMALL_BUFFER_SIZE];
     speed_t baudrate;           /* termios speed_t type */
     int baudrate_value;         /* Actual numeric value for display */
     parity_t parity;

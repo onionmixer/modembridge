@@ -48,6 +48,15 @@ typedef struct {
     connection_state_t state;
     bool running;
 
+    /* Resource availability flags */
+    bool serial_ready;           /* Serial port available and open */
+    bool modem_ready;            /* Modem initialized successfully */
+
+    /* Retry state */
+    time_t last_serial_retry;    /* Last serial port retry attempt */
+    int serial_retry_interval;   /* Serial retry interval in seconds (default 10) */
+    int serial_retry_count;      /* Number of serial retry attempts (for logging) */
+
     /* Data buffers */
     circular_buffer_t serial_to_telnet_buf;
     circular_buffer_t telnet_to_serial_buf;

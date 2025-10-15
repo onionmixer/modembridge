@@ -8,6 +8,7 @@
 #include "modem.h"
 #include "telnet.h"
 #include "bridge.h"
+#include "healthcheck.h"
 #include <getopt.h>
 
 /* Signal handler */
@@ -150,6 +151,22 @@ int main(int argc, char *argv[])
     }
 
     config_print(&config);
+
+    /* === Health Check (one-time, at startup) === */
+    printf("\n");
+    health_report_t health;
+    if (healthcheck_run(&config, &health) == SUCCESS) {
+        healthcheck_print_report(&health);
+    } else {
+        printf("=== Health Check ===\n");
+        printf("Health check failed to run\n");
+        printf("====================\n");
+    }
+    printf("\n");
+
+    /* Health check results are informational only - server will start regardless */
+    MB_LOG_INFO("Starting server (health check completed)...");
+    /* === Health Check End === */
 
     /* Setup signal handlers */
     if (setup_signals() != SUCCESS) {

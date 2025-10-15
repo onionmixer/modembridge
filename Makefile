@@ -11,14 +11,15 @@ LIBS =
 SRC_DIR = src
 INC_DIR = include
 BUILD_DIR = build
-OBJ_DIR = $(BUILD_DIR)/obj
+OBJ_DIR = obj
 
 # Target executable
 TARGET = $(BUILD_DIR)/modembridge
 
 # Source files
 SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/bridge.c $(SRC_DIR)/telnet.c $(SRC_DIR)/serial.c \
-          $(SRC_DIR)/modem.c $(SRC_DIR)/config.c $(SRC_DIR)/common.c $(SRC_DIR)/datalog.c
+          $(SRC_DIR)/modem.c $(SRC_DIR)/config.c $(SRC_DIR)/common.c $(SRC_DIR)/datalog.c \
+          $(SRC_DIR)/healthcheck.c
 OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
 
 # Header dependencies
@@ -56,7 +57,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 .PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."
-	@rm -rf $(BUILD_DIR)
+	@rm -rf $(BUILD_DIR) $(OBJ_DIR)
 	@echo "Clean complete"
 
 # Install (requires root)

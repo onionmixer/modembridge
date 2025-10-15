@@ -35,7 +35,7 @@ void config_init(config_t *cfg)
     memset(cfg, 0, sizeof(config_t));
 
     /* Default serial port settings */
-    SAFE_STRNCPY(cfg->comport, "/dev/ttyUSB0", sizeof(cfg->comport));
+    SAFE_STRNCPY(cfg->serial_port, "/dev/ttyUSB0", sizeof(cfg->serial_port));
     cfg->baudrate = B57600;
     cfg->baudrate_value = 57600;
     cfg->parity = PARITY_NONE;
@@ -101,8 +101,8 @@ static int parse_config_line(config_t *cfg, char *line)
     MB_LOG_DEBUG("Config: %s = %s", key, value);
 
     /* Parse key-value pairs */
-    if (strcasecmp(key, "COMPORT") == 0) {
-        SAFE_STRNCPY(cfg->comport, value, sizeof(cfg->comport));
+    if (strcasecmp(key, "SERIAL_PORT") == 0 || strcasecmp(key, "COMPORT") == 0) {
+        SAFE_STRNCPY(cfg->serial_port, value, sizeof(cfg->serial_port));
     }
     else if (strcasecmp(key, "BAUDRATE") == 0) {
         int baud = atoi(value);
@@ -201,9 +201,9 @@ int config_validate(const config_t *cfg)
         return ERROR_INVALID_ARG;
     }
 
-    /* Validate COM port */
-    if (strlen(cfg->comport) == 0) {
-        MB_LOG_ERROR("COM port not specified");
+    /* Validate serial port */
+    if (strlen(cfg->serial_port) == 0) {
+        MB_LOG_ERROR("Serial port not specified");
         return ERROR_CONFIG;
     }
 
@@ -243,7 +243,7 @@ int config_validate(const config_t *cfg)
 }
 
 /**
- * Print configuration to log
+ * Print configuration to log and stdout
  */
 void config_print(const config_t *cfg)
 {
@@ -251,9 +251,27 @@ void config_print(const config_t *cfg)
         return;
     }
 
+    /* Print to stdout */
+    printf("=== Configuration ===\n");
+    printf("Serial Port:\n");
+    printf("  Device:     %s\n", cfg->serial_port);
+    printf("  Baudrate:   %d\n", cfg->baudrate_value);
+    printf("  Parity:     %s\n", config_parity_to_str(cfg->parity));
+    printf("  Data bits:  %d\n", cfg->data_bits);
+    printf("  Stop bits:  %d\n", cfg->stop_bits);
+    printf("  Flow ctrl:  %s\n", config_flow_to_str(cfg->flow_control));
+    printf("Telnet:\n");
+    printf("  Host:       %s\n", cfg->telnet_host);
+    printf("  Port:       %d\n", cfg->telnet_port);
+    printf("Data Logging:\n");
+    printf("  Enabled:    %s\n", cfg->data_log_enabled ? "yes" : "no");
+    printf("  File:       %s\n", cfg->data_log_file);
+    printf("====================\n");
+
+    /* Also log to syslog */
     MB_LOG_INFO("=== Configuration ===");
     MB_LOG_INFO("Serial Port:");
-    MB_LOG_INFO("  Device:     %s", cfg->comport);
+    MB_LOG_INFO("  Device:     %s", cfg->serial_port);
     MB_LOG_INFO("  Baudrate:   %d", cfg->baudrate_value);
     MB_LOG_INFO("  Parity:     %s", config_parity_to_str(cfg->parity));
     MB_LOG_INFO("  Data bits:  %d", cfg->data_bits);

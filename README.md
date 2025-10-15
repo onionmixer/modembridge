@@ -92,7 +92,7 @@ Create a configuration file (default: `/etc/modembridge.conf`):
 
 ```ini
 # Serial Port Configuration
-COMPORT=/dev/ttyUSB0
+SERIAL_PORT=/dev/ttyUSB0
 BAUDRATE=115200
 BIT_PARITY=N          # N=None, E=Even, O=Odd
 BIT_DATA=8            # 5, 6, 7, or 8
@@ -232,7 +232,7 @@ ATH         # Should respond: OK, then NO CARRIER
 2. **Configure modembridge**
    ```bash
    # Edit modembridge.conf
-   COMPORT=/dev/ttyUSB0
+   SERIAL_PORT=/dev/ttyUSB0
    BAUDRATE=115200
    TELNET_HOST=telehack.com
    TELNET_PORT=23

@@ -5,6 +5,7 @@
 #include "bridge.h"
 #include <sys/select.h>
 #include <time.h>
+#include <unistd.h>
 
 /* Forward declarations */
 static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx);
@@ -347,7 +348,8 @@ void bridge_init(bridge_ctx_t *ctx, config_t *cfg)
 }
 
 /**
- * Start bridge operation
+ * Start bridge operation (non-blocking)
+ * Returns SUCCESS even if serial port is not available
  */
 int bridge_start(bridge_ctx_t *ctx)
 {
@@ -357,17 +359,35 @@ int bridge_start(bridge_ctx_t *ctx)
 
     MB_LOG_INFO("Starting bridge");
 
-    /* Open serial port */
-    int ret = serial_open(&ctx->serial, ctx->config->comport, ctx->config);
-    if (ret != SUCCESS) {
-        MB_LOG_ERROR("Failed to open serial port");
-        return ret;
+    /* Initialize retry state */
+    ctx->serial_ready = false;
+    ctx->modem_ready = false;
+    ctx->last_serial_retry = 0;
+    ctx->serial_retry_interval = 10;  /* 10 seconds */
+    ctx->serial_retry_count = 0;
+
+    /* Try to open serial port (non-blocking) */
+    int ret = serial_open(&ctx->serial, ctx->config->serial_port, ctx->config);
+    if (ret == SUCCESS) {
+        ctx->serial_ready = true;
+
+        /* Initialize modem */
+        modem_init(&ctx->modem, &ctx->serial);
+        ctx->modem_ready = true;
+
+        MB_LOG_INFO("Serial port opened successfully: %s",
+                   ctx->config->serial_port);
+    } else {
+        /* Serial port not available - will retry later */
+        ctx->serial_ready = false;
+        ctx->modem_ready = false;
+        ctx->last_serial_retry = time(NULL);
+
+        MB_LOG_WARNING("Serial port not available: %s (will retry every %d seconds)",
+                      ctx->config->serial_port, ctx->serial_retry_interval);
     }
 
-    /* Initialize modem */
-    modem_init(&ctx->modem, &ctx->serial);
-
-    /* Open data log if enabled */
+    /* Open data log if enabled (independent of serial) */
     if (ctx->config->data_log_enabled) {
         int ret_log = datalog_open(&ctx->datalog, ctx->config->data_log_file);
         if (ret_log == SUCCESS) {
@@ -381,9 +401,13 @@ int bridge_start(bridge_ctx_t *ctx)
     ctx->state = STATE_IDLE;
     ctx->running = true;
 
-    MB_LOG_INFO("Bridge started, waiting for modem connection");
+    if (ctx->serial_ready) {
+        MB_LOG_INFO("Bridge started (READY state), waiting for modem commands");
+    } else {
+        MB_LOG_INFO("Bridge started (DISCONNECTED state), waiting for serial port");
+    }
 
-    return SUCCESS;
+    return SUCCESS;  /* Always return success! */
 }
 
 /**
@@ -404,13 +428,15 @@ int bridge_stop(bridge_ctx_t *ctx)
         telnet_disconnect(&ctx->telnet);
     }
 
-    /* Hang up modem */
-    if (modem_is_online(&ctx->modem)) {
+    /* Hang up modem (if serial is ready) */
+    if (ctx->modem_ready && modem_is_online(&ctx->modem)) {
         modem_hangup(&ctx->modem);
     }
 
-    /* Close serial port */
-    serial_close(&ctx->serial);
+    /* Close serial port (if ready) */
+    if (ctx->serial_ready) {
+        serial_close(&ctx->serial);
+    }
 
     /* Close data log */
     if (datalog_is_enabled(&ctx->datalog)) {
@@ -550,6 +576,7 @@ int bridge_handle_telnet_disconnect(bridge_ctx_t *ctx)
 
 /**
  * Process data from serial port
+ * Handles serial I/O errors and transitions to DISCONNECTED state
  */
 int bridge_process_serial_data(bridge_ctx_t *ctx)
 {
@@ -566,7 +593,32 @@ int bridge_process_serial_data(bridge_ctx_t *ctx)
     /* Read from serial port */
     n = serial_read(&ctx->serial, buf, sizeof(buf));
     if (n < 0) {
-        MB_LOG_ERROR("Serial read error");
+        /* Serial I/O error detected - transition to DISCONNECTED state */
+        MB_LOG_ERROR("Serial I/O error detected: %s", strerror(errno));
+
+        /* Close telnet connection if active (ONLINE state) */
+        if (telnet_is_connected(&ctx->telnet)) {
+            MB_LOG_INFO("Closing telnet connection due to serial port error");
+            telnet_disconnect(&ctx->telnet);
+
+            /* Send NO CARRIER to modem if online */
+            if (modem_is_online(&ctx->modem)) {
+                modem_send_no_carrier(&ctx->modem);
+            }
+        }
+
+        /* Close serial port */
+        serial_close(&ctx->serial);
+
+        /* Transition to DISCONNECTED state */
+        ctx->serial_ready = false;
+        ctx->modem_ready = false;
+        ctx->last_serial_retry = time(NULL);
+        ctx->state = STATE_IDLE;
+
+        MB_LOG_WARNING("Transitioned to DISCONNECTED state (will retry in %d seconds)",
+                      ctx->serial_retry_interval);
+
         return ERROR_IO;
     }
 
@@ -716,6 +768,7 @@ static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx)
 
 /**
  * Main bridge loop (I/O multiplexing)
+ * Implements state-based serial port retry logic
  */
 int bridge_run(bridge_ctx_t *ctx)
 {
@@ -732,14 +785,65 @@ int bridge_run(bridge_ctx_t *ctx)
         return ERROR_GENERAL;
     }
 
+    /* === DISCONNECTED State: Serial port auto-retry === */
+    if (!ctx->serial_ready) {
+        time_t now = time(NULL);
+
+        /* Check every 10 seconds */
+        if (now - ctx->last_serial_retry >= ctx->serial_retry_interval) {
+            ctx->last_serial_retry = now;
+            ctx->serial_retry_count++;
+
+            /* Check if device file exists */
+            if (access(ctx->config->serial_port, F_OK) == 0) {
+                MB_LOG_INFO("Serial port device detected (attempt #%d): %s",
+                           ctx->serial_retry_count, ctx->config->serial_port);
+
+                /* Try to open serial port */
+                ret = serial_open(&ctx->serial, ctx->config->serial_port, ctx->config);
+                if (ret == SUCCESS) {
+                    ctx->serial_ready = true;
+
+                    /* Initialize modem (no health check) */
+                    modem_init(&ctx->modem, &ctx->serial);
+                    ctx->modem_ready = true;
+
+                    MB_LOG_INFO("Transitioned to READY state after %d attempts",
+                               ctx->serial_retry_count);
+                    MB_LOG_INFO("Serial port connected: %s", ctx->config->serial_port);
+
+                    /* Reset retry counter */
+                    ctx->serial_retry_count = 0;
+                } else {
+                    MB_LOG_DEBUG("Serial port open failed (attempt #%d): %s",
+                                ctx->serial_retry_count, strerror(errno));
+                }
+            } else {
+                MB_LOG_DEBUG("Serial port device not found (attempt #%d): %s",
+                            ctx->serial_retry_count, ctx->config->serial_port);
+            }
+        }
+
+        /* Still in DISCONNECTED state - short sleep and return */
+        if (!ctx->serial_ready) {
+            usleep(100000);  /* 100ms */
+            return SUCCESS;
+        }
+    }
+
+    /* === READY/ONLINE State: Normal operation === */
+
     /* Setup file descriptor set */
     FD_ZERO(&readfds);
 
-    /* Add serial port */
-    int serial_fd = serial_get_fd(&ctx->serial);
-    if (serial_fd >= 0) {
-        FD_SET(serial_fd, &readfds);
-        maxfd = MAX(maxfd, serial_fd);
+    /* Add serial port (if ready) */
+    int serial_fd = -1;
+    if (ctx->serial_ready) {
+        serial_fd = serial_get_fd(&ctx->serial);
+        if (serial_fd >= 0) {
+            FD_SET(serial_fd, &readfds);
+            maxfd = MAX(maxfd, serial_fd);
+        }
     }
 
     /* Add telnet socket if connected */
