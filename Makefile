@@ -18,7 +18,7 @@ TARGET = $(BUILD_DIR)/modembridge
 
 # Source files
 SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/bridge.c $(SRC_DIR)/telnet.c $(SRC_DIR)/serial.c \
-          $(SRC_DIR)/modem.c $(SRC_DIR)/config.c $(SRC_DIR)/common.c
+          $(SRC_DIR)/modem.c $(SRC_DIR)/config.c $(SRC_DIR)/common.c $(SRC_DIR)/datalog.c
 OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SOURCES))
 
 # Header dependencies

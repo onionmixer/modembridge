@@ -111,6 +111,9 @@ typedef struct {
 
     /* Terminal type */
     char terminal_type[64];         /* Terminal type (e.g., "ANSI", "VT100") */
+
+    /* Data logging (optional - opaque pointer) */
+    void *datalog;                  /* Data logger pointer (set externally) */
 } telnet_t;
 
 /* Function prototypes */

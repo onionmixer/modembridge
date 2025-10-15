@@ -14,6 +14,7 @@
 #include "serial.h"
 #include "modem.h"
 #include "telnet.h"
+#include "datalog.h"
 
 /* ANSI escape sequence states */
 typedef enum {
@@ -64,6 +65,9 @@ typedef struct {
     uint64_t bytes_serial_to_telnet;
     uint64_t bytes_telnet_to_serial;
     time_t connection_start_time;
+
+    /* Data logging */
+    datalog_t datalog;
 } bridge_ctx_t;
 
 /* Function prototypes */

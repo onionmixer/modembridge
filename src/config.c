@@ -52,6 +52,10 @@ void config_init(config_t *cfg)
     SAFE_STRNCPY(cfg->pid_file, DEFAULT_PID_FILE, sizeof(cfg->pid_file));
     cfg->log_level = LOG_INFO;
 
+    /* Default data logging options */
+    cfg->data_log_enabled = false;
+    SAFE_STRNCPY(cfg->data_log_file, DEFAULT_DATALOG_FILE, sizeof(cfg->data_log_file));
+
     MB_LOG_DEBUG("Configuration initialized with defaults");
 }
 
@@ -135,6 +139,12 @@ static int parse_config_line(config_t *cfg, char *line)
     }
     else if (strcasecmp(key, "TELNET_PORT") == 0) {
         cfg->telnet_port = atoi(value);
+    }
+    else if (strcasecmp(key, "DATA_LOG_ENABLED") == 0) {
+        cfg->data_log_enabled = (atoi(value) != 0);
+    }
+    else if (strcasecmp(key, "DATA_LOG_FILE") == 0) {
+        SAFE_STRNCPY(cfg->data_log_file, value, sizeof(cfg->data_log_file));
     }
     else {
         MB_LOG_WARNING("Unknown config key: %s", key);
@@ -252,6 +262,9 @@ void config_print(const config_t *cfg)
     MB_LOG_INFO("Telnet:");
     MB_LOG_INFO("  Host:       %s", cfg->telnet_host);
     MB_LOG_INFO("  Port:       %d", cfg->telnet_port);
+    MB_LOG_INFO("Data Logging:");
+    MB_LOG_INFO("  Enabled:    %s", cfg->data_log_enabled ? "yes" : "no");
+    MB_LOG_INFO("  File:       %s", cfg->data_log_file);
     MB_LOG_INFO("====================");
 }
 

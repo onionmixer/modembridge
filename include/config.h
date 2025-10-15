@@ -45,6 +45,10 @@ typedef struct {
     bool daemon_mode;
     char pid_file[SMALL_BUFFER_SIZE];
     int log_level;
+
+    /* Data logging options */
+    bool data_log_enabled;
+    char data_log_file[SMALL_BUFFER_SIZE];
 } config_t;
 
 /* Function prototypes */

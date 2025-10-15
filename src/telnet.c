@@ -3,6 +3,7 @@
  */
 
 #include "telnet.h"
+#include "datalog.h"
 
 /**
  * Initialize telnet structure
@@ -31,6 +32,9 @@ void telnet_init(telnet_t *tn)
 
     /* Set default terminal type */
     SAFE_STRNCPY(tn->terminal_type, "ANSI", sizeof(tn->terminal_type));
+
+    /* No data logger by default */
+    tn->datalog = NULL;
 
     MB_LOG_DEBUG("Telnet initialized");
 }
@@ -186,6 +190,11 @@ int telnet_send_negotiate(telnet_t *tn, unsigned char command, unsigned char opt
     buf[2] = option;
 
     MB_LOG_DEBUG("Sending IAC negotiation: %d %d", command, option);
+
+    /* Log internal protocol negotiation */
+    if (tn->datalog != NULL) {
+        datalog_write((datalog_t *)tn->datalog, DATALOG_DIR_INTERNAL, buf, 3);
+    }
 
     if (send(tn->fd, buf, 3, 0) < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -384,6 +393,11 @@ static int telnet_send_subnegotiation(telnet_t *tn, const unsigned char *data, s
     buf[pos++] = TELNET_SE;
 
     MB_LOG_DEBUG("Sending subnegotiation: %zu bytes", pos);
+
+    /* Log internal protocol subnegotiation */
+    if (tn->datalog != NULL) {
+        datalog_write((datalog_t *)tn->datalog, DATALOG_DIR_INTERNAL, buf, pos);
+    }
 
     if (send(tn->fd, buf, pos, 0) < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {

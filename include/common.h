@@ -38,6 +38,7 @@
 /* Configuration */
 #define DEFAULT_CONFIG_FILE "/etc/modembridge.conf"
 #define DEFAULT_PID_FILE    "/var/run/modembridge.pid"
+#define DEFAULT_DATALOG_FILE "modembridge.log"
 
 /* Return codes */
 #define SUCCESS             0

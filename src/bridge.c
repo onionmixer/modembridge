@@ -325,6 +325,9 @@ void bridge_init(bridge_ctx_t *ctx, config_t *cfg)
     serial_init(&ctx->serial);
     telnet_init(&ctx->telnet);
 
+    /* Link telnet to datalog for internal protocol logging */
+    ctx->telnet.datalog = &ctx->datalog;
+
     /* Initialize buffers */
     cbuf_init(&ctx->serial_to_telnet_buf);
     cbuf_init(&ctx->telnet_to_serial_buf);
@@ -336,6 +339,9 @@ void bridge_init(bridge_ctx_t *ctx, config_t *cfg)
     ctx->bytes_serial_to_telnet = 0;
     ctx->bytes_telnet_to_serial = 0;
     ctx->connection_start_time = 0;
+
+    /* Initialize data logger */
+    datalog_init(&ctx->datalog);
 
     MB_LOG_DEBUG("Bridge context initialized");
 }
@@ -360,6 +366,17 @@ int bridge_start(bridge_ctx_t *ctx)
 
     /* Initialize modem */
     modem_init(&ctx->modem, &ctx->serial);
+
+    /* Open data log if enabled */
+    if (ctx->config->data_log_enabled) {
+        int ret_log = datalog_open(&ctx->datalog, ctx->config->data_log_file);
+        if (ret_log == SUCCESS) {
+            datalog_session_start(&ctx->datalog);
+            MB_LOG_INFO("Data logging enabled: %s", ctx->config->data_log_file);
+        } else {
+            MB_LOG_WARNING("Failed to open data log, continuing without logging");
+        }
+    }
 
     ctx->state = STATE_IDLE;
     ctx->running = true;
@@ -394,6 +411,11 @@ int bridge_stop(bridge_ctx_t *ctx)
 
     /* Close serial port */
     serial_close(&ctx->serial);
+
+    /* Close data log */
+    if (datalog_is_enabled(&ctx->datalog)) {
+        datalog_close(&ctx->datalog);
+    }
 
     /* Print statistics */
     bridge_print_stats(ctx);
@@ -553,6 +575,9 @@ int bridge_process_serial_data(bridge_ctx_t *ctx)
         return SUCCESS;
     }
 
+    /* Log data from modem */
+    datalog_write(&ctx->datalog, DATALOG_DIR_FROM_MODEM, buf, n);
+
     /* Process through modem layer */
     if (!modem_is_online(&ctx->modem)) {
         /* In command mode - let modem process the input */
@@ -600,6 +625,9 @@ int bridge_process_serial_data(bridge_ctx_t *ctx)
     if (telnet_len == 0) {
         return SUCCESS;
     }
+
+    /* Log data to telnet (after IAC escaping) */
+    datalog_write(&ctx->datalog, DATALOG_DIR_TO_TELNET, telnet_buf, telnet_len);
 
     /* Send to telnet */
     ssize_t sent = telnet_send(&ctx->telnet, telnet_buf, telnet_len);
@@ -655,6 +683,9 @@ static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx)
         return SUCCESS;
     }
 
+    /* Log data from telnet (raw, before IAC processing) */
+    datalog_write(&ctx->datalog, DATALOG_DIR_FROM_TELNET, telnet_buf, n);
+
     /* Process telnet protocol (remove IAC sequences) */
     telnet_process_input(&ctx->telnet, telnet_buf, n,
                         processed_buf, sizeof(processed_buf), &processed_len);
@@ -670,6 +701,9 @@ static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx)
     if (output_len == 0) {
         return SUCCESS;
     }
+
+    /* Log data to modem (after IAC processing, ready to send) */
+    datalog_write(&ctx->datalog, DATALOG_DIR_TO_MODEM, output_buf, output_len);
 
     /* Send to serial */
     ssize_t sent = serial_write(&ctx->serial, output_buf, output_len);
