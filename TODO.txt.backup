@@ -1,0 +1,2530 @@
+ModemBridge 프로젝트 개발 계획
+=====================================
+
+프로젝트 개요:
+- USB Serial을 통한 Dialup Modem과 Telnet 서버를 연결하는 Bridge 서버
+- 개발 언어: C
+- 최소 요구사항: Ubuntu 22.04 LTS
+
+
+현재 상태:
+=========
+✅ Phase 1-9: 완료 (기본 기능 구현 완료)
+✅ Phase 10: 완료 (통합 테스트 완료)
+✅ Phase 12: 완료 (Resilient Architecture + Health Check)
+
+
+Phase 12: Resilient Architecture 및 Health Check 구현 (완료)
+============================================================
+
+목표:
+-----
+서버 시작 시 리소스가 없어도 정상 시작되며, 리소스가 나중에 준비되면
+자동으로 인식하고 사용할 수 있는 탄력적인 아키텍처 구현
+
+핵심 원칙:
+---------
+1. **Non-blocking Startup**: Serial port, Modem, Telnet 서버가 없어도 서버는 시작됨
+2. **Dynamic Resource Discovery**: 리소스가 나중에 준비되면 자동으로 감지하고 사용
+3. **Health Check**: 서버 시작 시 한 번만 진단 정보 출력 (재시도 안 함)
+
+
+리소스별 전략:
+-------------
+
+1. Serial Port
+   현재 문제: serial_open() 실패 → 서버 종료
+   새 동작:
+   - 서버 시작 시 serial_open() 실패해도 서버는 계속 실행
+   - 메인 루프에서 10초마다 자동으로 재시도
+   - 연결 성공하면 자동으로 Modem 초기화하고 사용 시작
+
+2. Modem Device
+   현재: Serial port 없으면 Modem도 없음
+   새 동작:
+   - Serial port 연결되면 자동으로 Modem 초기화
+   - AT 명령어 응답 대기
+
+3. Telnet Server
+   현재 문제: telnet_connect() 실패 → NO CARRIER만 전송, 재시도 없음
+   새 동작:
+   - Health check는 서버 시작 시 한 번만 (진단 목적)
+   - 실제 연결은 Modem이 ATA 명령 받을 때마다 시도
+   - 실패하면 NO CARRIER, 다음 ATA에서 다시 시도
+
+
+Serial Port 및 Modem Health Check 상태 흐름도:
+---------------------------------------------
+
+상태 정의:
+  DISCONNECTED: Serial port 없음 (초기 상태)
+  READY:        Serial port 연결됨, modem 초기화됨, AT 명령 대기 중
+  ONLINE:       Modem-Telnet 통신 중
+
+동작 흐름:
+
+1. 서버가 시작된다
+   → DISCONNECTED 상태
+
+2. Serial port health check 진행 (서버 시작 시 한 번만)
+   - 성공 → 3으로
+   - 실패 → DISCONNECTED 상태 유지, 5로
+
+3. Modem health check 진행 (Serial port 연결 시)
+   - 성공 → READY 상태로 전환 (AT 명령 대기)
+   - 실패 → READY 상태로 전환 (modem은 나중에 응답할 수 있음)
+
+4. READY 상태에서 동작:
+   - Modem으로부터 AT 명령 수신 및 처리
+   - ATA 명령 수신 시 telnet 연결 시도
+     → 성공하면 ONLINE 상태로 전환
+     → 실패하면 NO CARRIER 전송, READY 상태 유지
+
+5. Background 모니터링 (상태별로 다른 동작):
+
+   [DISCONNECTED 상태]
+   - 10초마다 serial port device 존재 여부 체크
+   - Device 발견되면:
+     → Serial port open 시도
+     → 성공 시 Modem 초기화 (health check는 안 함)
+     → READY 상태로 전환
+
+   [READY 상태]
+   - Serial I/O 오류 실시간 감지
+   - 오류 발생 시:
+     → Serial port close
+     → DISCONNECTED 상태로 전환
+     → 5-DISCONNECTED로 복귀 (10초 재시도 시작)
+
+   [ONLINE 상태]
+   - Serial I/O 오류 또는 Telnet 연결 종료 실시간 감지
+   - 오류/종료 발생 시:
+     → Telnet 연결 종료 (있으면)
+     → Serial port close
+     → DISCONNECTED 상태로 전환
+     → 5-DISCONNECTED로 복귀 (10초 재시도 시작)
+
+6. 상태 전환 요약:
+   DISCONNECTED --[device found + serial_open() success]--> READY
+   READY --[ATA + telnet_connect() success]--> ONLINE
+   ONLINE --[disconnect/error]--> DISCONNECTED
+   READY --[serial error]--> DISCONNECTED
+
+핵심 차이점:
+- Health check는 서버 시작 시에만 수행 (진단 목적)
+- DISCONNECTED 상태: 10초마다 device 파일 존재 확인 (polling)
+- READY/ONLINE 상태: I/O 오류를 실시간 감지 (event-driven)
+- 통신 중(ONLINE)에도 serial port 오류 실시간 감지 가능
+- 모든 오류는 DISCONNECTED 상태로 돌아가서 10초 재시도 시작
+
+
+구현 계획:
+---------
+
+[12-1] Bridge Context에 Retry State 추가
+      파일: include/bridge.h
+
+      추가 필드:
+      ```c
+      typedef struct {
+          // 기존 필드들...
+
+          /* Resource availability flags */
+          bool serial_ready;           // Serial port 사용 가능 여부
+          bool modem_ready;            // Modem 초기화 완료 여부
+
+          /* Retry state */
+          time_t last_serial_retry;    // 마지막 serial 재시도 시간
+          int serial_retry_interval;   // Serial 재시도 간격 (기본 10초)
+          int serial_retry_count;      // Serial 재시도 횟수 (로깅용)
+      } bridge_ctx_t;
+      ```
+
+[12-2] bridge_start() 수정 - Non-blocking 시작
+      파일: src/bridge.c
+
+      현재 코드 (bridge.c:352-387):
+      ```c
+      int bridge_start(bridge_ctx_t *ctx)
+      {
+          /* Open serial port */
+          int ret = serial_open(&ctx->serial, ctx->config->serial_port, ctx->config);
+          if (ret != SUCCESS) {
+              MB_LOG_ERROR("Failed to open serial port");
+              return ret;  // ← 여기서 실패하면 서버 종료!
+          }
+          // ...
+      }
+      ```
+
+      새 코드:
+      ```c
+      int bridge_start(bridge_ctx_t *ctx)
+      {
+          if (ctx == NULL || ctx->config == NULL) {
+              return ERROR_INVALID_ARG;
+          }
+
+          MB_LOG_INFO("Starting bridge");
+
+          /* Initialize retry state */
+          ctx->serial_ready = false;
+          ctx->modem_ready = false;
+          ctx->last_serial_retry = 0;
+          ctx->serial_retry_interval = 10;  // 10초
+          ctx->serial_retry_count = 0;
+
+          /* Try to open serial port (non-blocking) */
+          int ret = serial_open(&ctx->serial, ctx->config->serial_port, ctx->config);
+          if (ret == SUCCESS) {
+              ctx->serial_ready = true;
+
+              /* Initialize modem */
+              modem_init(&ctx->modem, &ctx->serial);
+              ctx->modem_ready = true;
+
+              MB_LOG_INFO("Serial port opened successfully: %s",
+                         ctx->config->serial_port);
+          } else {
+              /* Serial port not available - will retry later */
+              ctx->serial_ready = false;
+              ctx->modem_ready = false;
+              ctx->last_serial_retry = time(NULL);
+
+              MB_LOG_WARNING("Serial port not available: %s (will retry every %d seconds)",
+                            ctx->config->serial_port, ctx->serial_retry_interval);
+          }
+
+          /* Open data log if enabled (independent of serial) */
+          if (ctx->config->data_log_enabled) {
+              int ret_log = datalog_open(&ctx->datalog, ctx->config->data_log_file);
+              if (ret_log == SUCCESS) {
+                  datalog_session_start(&ctx->datalog);
+                  MB_LOG_INFO("Data logging enabled: %s", ctx->config->data_log_file);
+              } else {
+                  MB_LOG_WARNING("Failed to open data log, continuing without logging");
+              }
+          }
+
+          ctx->state = STATE_IDLE;
+          ctx->running = true;
+
+          if (ctx->serial_ready) {
+              MB_LOG_INFO("Bridge started, waiting for modem connection");
+          } else {
+              MB_LOG_INFO("Bridge started (waiting for serial port)");
+          }
+
+          return SUCCESS;  // 항상 성공 반환!
+      }
+      ```
+
+[12-3] bridge_run() 수정 - Serial Port 자동 재시도
+      파일: src/bridge.c
+
+      현재 코드 (bridge.c:371-439):
+      ```c
+      int bridge_run(bridge_ctx_t *ctx)
+      {
+          // select() 호출
+          // Serial fd와 Telnet fd 모니터링
+          // ...
+      }
+      ```
+
+      새 코드 (bridge_run() 시작 부분에 추가):
+      ```c
+      int bridge_run(bridge_ctx_t *ctx)
+      {
+          fd_set readfds;
+          struct timeval timeout;
+          int maxfd = 0;
+          int ret;
+
+          if (ctx == NULL) {
+              return ERROR_INVALID_ARG;
+          }
+
+          if (!ctx->running) {
+              return ERROR_GENERAL;
+          }
+
+          /* === 새로 추가: Serial Port 자동 재시도 === */
+          if (!ctx->serial_ready) {
+              time_t now = time(NULL);
+
+              /* 10초마다 재시도 */
+              if (now - ctx->last_serial_retry >= ctx->serial_retry_interval) {
+                  ctx->last_serial_retry = now;
+                  ctx->serial_retry_count++;
+
+                  MB_LOG_INFO("Retrying serial port connection (attempt #%d): %s",
+                             ctx->serial_retry_count, ctx->config->serial_port);
+
+                  int ret = serial_open(&ctx->serial, ctx->config->serial_port,
+                                       ctx->config);
+                  if (ret == SUCCESS) {
+                      ctx->serial_ready = true;
+
+                      /* Initialize modem */
+                      modem_init(&ctx->modem, &ctx->serial);
+                      ctx->modem_ready = true;
+
+                      MB_LOG_INFO("Serial port connected successfully after %d attempts!",
+                                 ctx->serial_retry_count);
+
+                      /* Reset retry counter for next time */
+                      ctx->serial_retry_count = 0;
+                  } else {
+                      MB_LOG_DEBUG("Serial port still not available (retry #%d)",
+                                  ctx->serial_retry_count);
+                  }
+              }
+
+              /* Serial port가 없으면 짧은 sleep 후 리턴 */
+              if (!ctx->serial_ready) {
+                  usleep(100000);  // 100ms sleep
+                  return SUCCESS;
+              }
+          }
+          /* === 자동 재시도 로직 끝 === */
+
+          /* Setup file descriptor set */
+          FD_ZERO(&readfds);
+
+          /* Add serial port (if ready) */
+          int serial_fd = -1;
+          if (ctx->serial_ready) {
+              serial_fd = serial_get_fd(&ctx->serial);
+              if (serial_fd >= 0) {
+                  FD_SET(serial_fd, &readfds);
+                  maxfd = MAX(maxfd, serial_fd);
+              }
+          }
+
+          /* Add telnet socket if connected */
+          if (telnet_is_connected(&ctx->telnet)) {
+              int telnet_fd = telnet_get_fd(&ctx->telnet);
+              if (telnet_fd >= 0) {
+                  FD_SET(telnet_fd, &readfds);
+                  maxfd = MAX(maxfd, telnet_fd);
+              }
+          }
+
+          /* Set timeout */
+          timeout.tv_sec = 1;
+          timeout.tv_usec = 0;
+
+          /* Wait for activity (기존 코드 계속...) */
+          // ...
+      }
+      ```
+
+[12-4] bridge_process_serial_data() 수정
+      Serial port가 갑자기 끊어진 경우 처리:
+
+      ```c
+      int bridge_process_serial_data(bridge_ctx_t *ctx)
+      {
+          // ...
+
+          /* Read from serial port */
+          n = serial_read(&ctx->serial, buf, sizeof(buf));
+          if (n < 0) {
+              MB_LOG_ERROR("Serial read error - serial port disconnected?");
+
+              /* Mark serial as not ready */
+              ctx->serial_ready = false;
+              ctx->modem_ready = false;
+              ctx->last_serial_retry = time(NULL);
+
+              /* Close serial port */
+              serial_close(&ctx->serial);
+
+              MB_LOG_WARNING("Serial port lost, will retry connection");
+
+              return ERROR_IO;
+          }
+
+          // ...
+      }
+      ```
+
+[12-5] Telnet 연결 - 현재 동작 유지 (재시도 안 함)
+      파일: src/bridge.c
+
+      현재 bridge_handle_modem_connect() 동작:
+      ```c
+      int bridge_handle_modem_connect(bridge_ctx_t *ctx)
+      {
+          MB_LOG_INFO("Modem connection established, connecting to telnet server");
+
+          /* Connect to telnet server */
+          int ret = telnet_connect(&ctx->telnet, ctx->config->telnet_host,
+                                   ctx->config->telnet_port);
+          if (ret != SUCCESS) {
+              MB_LOG_ERROR("Failed to connect to telnet server");
+              modem_send_response(&ctx->modem, MODEM_RESP_NO_CARRIER);
+              ctx->state = STATE_IDLE;
+              return ret;
+          }
+          // ...
+      }
+      ```
+
+      → 이 동작 유지!
+      - ATA 명령마다 telnet_connect() 시도
+      - 실패하면 NO CARRIER
+      - 다음 ATA에서 다시 시도
+
+[12-6] Health Check 모듈 구현
+      파일: include/healthcheck.h, src/healthcheck.c
+
+      목적: 서버 시작 시 한 번만 진단 정보 출력
+
+      구조체:
+      ```c
+      typedef enum {
+          HEALTH_STATUS_OK,       // 정상
+          HEALTH_STATUS_WARNING,  // 경고
+          HEALTH_STATUS_ERROR,    // 오류
+          HEALTH_STATUS_UNKNOWN   // 알 수 없음
+      } health_status_t;
+
+      typedef struct {
+          health_status_t status;
+          char message[SMALL_BUFFER_SIZE];
+      } health_check_result_t;
+
+      typedef struct {
+          health_check_result_t serial_port;
+          health_check_result_t modem_device;
+          health_check_result_t telnet_server;
+      } health_report_t;
+      ```
+
+      함수:
+      ```c
+      // 전체 health check 수행 (한 번만)
+      int healthcheck_run(const config_t *cfg, health_report_t *report);
+
+      // 개별 체크 (타임아웃 있음, 비차단)
+      int healthcheck_serial_port(const char *device,
+                                  health_check_result_t *result);
+      int healthcheck_modem_device(const char *device, const config_t *cfg,
+                                   health_check_result_t *result);
+      int healthcheck_telnet_server(const char *host, int port,
+                                    health_check_result_t *result);
+
+      // 결과 출력
+      void healthcheck_print_report(const health_report_t *report);
+      ```
+
+[12-7] healthcheck_serial_port() 구현
+      ```c
+      int healthcheck_serial_port(const char *device, health_check_result_t *result)
+      {
+          result->status = HEALTH_STATUS_UNKNOWN;
+
+          /* 1. 파일 존재 확인 */
+          if (access(device, F_OK) != 0) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Device does not exist: %s", device);
+              return ERROR_IO;
+          }
+
+          /* 2. Character device 확인 */
+          struct stat st;
+          if (stat(device, &st) != 0 || !S_ISCHR(st.st_mode)) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Not a character device: %s", device);
+              return ERROR_IO;
+          }
+
+          /* 3. 접근 권한 확인 */
+          if (access(device, R_OK | W_OK) != 0) {
+              result->status = HEALTH_STATUS_WARNING;
+              snprintf(result->message, sizeof(result->message),
+                      "Permission denied: %s (try: sudo usermod -a -G dialout $USER)",
+                      device);
+              return ERROR_IO;
+          }
+
+          /* 4. 실제 오픈 시도 (즉시 닫음) */
+          int fd = open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
+          if (fd < 0) {
+              result->status = HEALTH_STATUS_WARNING;
+              snprintf(result->message, sizeof(result->message),
+                      "Failed to open: %s (%s)", device, strerror(errno));
+              return ERROR_IO;
+          }
+          close(fd);
+
+          /* 성공 */
+          result->status = HEALTH_STATUS_OK;
+          snprintf(result->message, sizeof(result->message),
+                  "Device exists and accessible: %s", device);
+          return SUCCESS;
+      }
+      ```
+
+[12-8] healthcheck_modem_device() 구현 (선택적)
+      2초 타임아웃으로 AT 명령 테스트:
+
+      ```c
+      int healthcheck_modem_device(const char *device, const config_t *cfg,
+                                   health_check_result_t *result)
+      {
+          serial_port_t port;
+          char response[SMALL_BUFFER_SIZE];
+          const char *at_cmd = "AT\r\n";
+          struct timeval tv;
+          fd_set readfds;
+          int ret;
+
+          result->status = HEALTH_STATUS_UNKNOWN;
+
+          /* Temporary port open */
+          serial_init(&port);
+          if (serial_open(&port, device, cfg) != SUCCESS) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Cannot open serial port");
+              return ERROR_IO;
+          }
+
+          /* Send AT command */
+          serial_write(&port, at_cmd, strlen(at_cmd));
+
+          /* Wait for response (2 second timeout) */
+          FD_ZERO(&readfds);
+          FD_SET(port.fd, &readfds);
+          tv.tv_sec = 2;
+          tv.tv_usec = 0;
+
+          ret = select(port.fd + 1, &readfds, NULL, NULL, &tv);
+
+          if (ret > 0) {
+              ssize_t n = serial_read(&port, response, sizeof(response) - 1);
+              if (n > 0) {
+                  result->status = HEALTH_STATUS_OK;
+                  snprintf(result->message, sizeof(result->message),
+                          "Modem responded to AT command");
+              } else {
+                  result->status = HEALTH_STATUS_WARNING;
+                  snprintf(result->message, sizeof(result->message),
+                          "Read error from modem");
+              }
+          } else if (ret == 0) {
+              result->status = HEALTH_STATUS_WARNING;
+              snprintf(result->message, sizeof(result->message),
+                      "No response (timeout 2s) - modem may be offline");
+          } else {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Select error: %s", strerror(errno));
+          }
+
+          serial_close(&port);
+          return SUCCESS;
+      }
+      ```
+
+[12-9] healthcheck_telnet_server() 구현
+      5초 타임아웃으로 TCP 연결 테스트:
+
+      ```c
+      int healthcheck_telnet_server(const char *host, int port,
+                                    health_check_result_t *result)
+      {
+          int sockfd;
+          struct sockaddr_in server_addr;
+          struct hostent *he;
+          struct timeval tv;
+          fd_set writefds;
+          int ret;
+
+          result->status = HEALTH_STATUS_UNKNOWN;
+
+          /* DNS resolution */
+          he = gethostbyname(host);
+          if (he == NULL) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Failed to resolve: %s", host);
+              return ERROR_CONNECTION;
+          }
+
+          /* Create socket */
+          sockfd = socket(AF_INET, SOCK_STREAM, 0);
+          if (sockfd < 0) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Failed to create socket");
+              return ERROR_CONNECTION;
+          }
+
+          /* Non-blocking */
+          fcntl(sockfd, F_SETFL, O_NONBLOCK);
+
+          /* Connect */
+          memset(&server_addr, 0, sizeof(server_addr));
+          server_addr.sin_family = AF_INET;
+          server_addr.sin_port = htons(port);
+          memcpy(&server_addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+          ret = connect(sockfd, (struct sockaddr *)&server_addr,
+                       sizeof(server_addr));
+
+          if (ret == 0) {
+              /* Immediate connection (localhost) */
+              result->status = HEALTH_STATUS_OK;
+              snprintf(result->message, sizeof(result->message),
+                      "Connected: %s:%d", host, port);
+              close(sockfd);
+              return SUCCESS;
+          }
+
+          if (errno != EINPROGRESS) {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Connection failed: %s", strerror(errno));
+              close(sockfd);
+              return ERROR_CONNECTION;
+          }
+
+          /* Wait for connection (5 second timeout) */
+          FD_ZERO(&writefds);
+          FD_SET(sockfd, &writefds);
+          tv.tv_sec = 5;
+          tv.tv_usec = 0;
+
+          ret = select(sockfd + 1, NULL, &writefds, NULL, &tv);
+
+          if (ret > 0) {
+              int error = 0;
+              socklen_t len = sizeof(error);
+              getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len);
+
+              if (error == 0) {
+                  result->status = HEALTH_STATUS_OK;
+                  snprintf(result->message, sizeof(result->message),
+                          "Connected: %s:%d", host, port);
+              } else {
+                  result->status = HEALTH_STATUS_ERROR;
+                  snprintf(result->message, sizeof(result->message),
+                          "Connection failed: %s", strerror(error));
+              }
+          } else if (ret == 0) {
+              result->status = HEALTH_STATUS_WARNING;
+              snprintf(result->message, sizeof(result->message),
+                      "Timeout (5s): %s:%d", host, port);
+          } else {
+              result->status = HEALTH_STATUS_ERROR;
+              snprintf(result->message, sizeof(result->message),
+                      "Select error: %s", strerror(errno));
+          }
+
+          close(sockfd);
+          return SUCCESS;
+      }
+      ```
+
+[12-10] healthcheck_print_report() 구현
+       ```c
+       void healthcheck_print_report(const health_report_t *report)
+       {
+           if (report == NULL) {
+               return;
+           }
+
+           printf("Serial Port:\n");
+           printf("  Status: %s\n",
+                  report->serial_port.status == HEALTH_STATUS_OK ? "OK" :
+                  report->serial_port.status == HEALTH_STATUS_WARNING ? "WARNING" :
+                  report->serial_port.status == HEALTH_STATUS_ERROR ? "ERROR" : "UNKNOWN");
+           printf("  %s\n", report->serial_port.message);
+           printf("\n");
+
+           printf("Modem Device:\n");
+           printf("  Status: %s\n",
+                  report->modem_device.status == HEALTH_STATUS_OK ? "OK" :
+                  report->modem_device.status == HEALTH_STATUS_WARNING ? "WARNING" :
+                  report->modem_device.status == HEALTH_STATUS_ERROR ? "ERROR" : "UNKNOWN");
+           printf("  %s\n", report->modem_device.message);
+           printf("\n");
+
+           printf("Telnet Server:\n");
+           printf("  Status: %s\n",
+                  report->telnet_server.status == HEALTH_STATUS_OK ? "OK" :
+                  report->telnet_server.status == HEALTH_STATUS_WARNING ? "WARNING" :
+                  report->telnet_server.status == HEALTH_STATUS_ERROR ? "ERROR" : "UNKNOWN");
+           printf("  %s\n", report->telnet_server.message);
+       }
+       ```
+
+[12-11] main.c 통합
+       위치: config_print() 직후, bridge_start() 호출 전
+
+       ```c
+       /* Main function */
+       int main(int argc, char *argv[])
+       {
+           // ... (설정 로드)
+
+           config_print(&config);
+
+           /* === Health Check (한 번만 실행) === */
+           printf("\n");
+           printf("=== Health Check ===\n");
+
+           health_report_t health;
+           if (healthcheck_run(&config, &health) == SUCCESS) {
+               healthcheck_print_report(&health);
+           } else {
+               printf("Health check failed to run\n");
+           }
+
+           printf("====================\n");
+           printf("\n");
+
+           /* Health check 결과와 관계없이 서버 시작 */
+           MB_LOG_INFO("Starting server (health check completed)...");
+           /* === Health Check 끝 === */
+
+           // Setup signal handlers...
+
+           // Daemonize...
+
+           /* Initialize and run bridge */
+           bridge_ctx_t bridge;
+           bridge_init(&bridge, &config);
+
+           /* bridge_start()는 이제 항상 성공! */
+           if (bridge_start(&bridge) != SUCCESS) {
+               /* 이 경우는 심각한 에러만 (메모리 부족 등) */
+               MB_LOG_ERROR("Failed to start bridge (critical error)");
+               ret = ERROR_GENERAL;
+               goto cleanup_bridge;
+           }
+
+           /* Main loop */
+           while (g_running) {
+               /* bridge_run()이 serial port 재시도 처리 */
+               if (bridge_run(&bridge) != SUCCESS) {
+                   MB_LOG_ERROR("Bridge error, exiting...");
+                   break;
+               }
+
+               if (g_reload_config) {
+                   // ...
+               }
+           }
+
+           // Cleanup...
+       }
+       ```
+
+[12-12] Makefile 업데이트
+       ```makefile
+       SOURCES = src/main.c \
+                 src/bridge.c \
+                 src/serial.c \
+                 src/modem.c \
+                 src/telnet.c \
+                 src/config.c \
+                 src/common.c \
+                 src/datalog.c \
+                 src/healthcheck.c    # ← 추가
+
+       HEADERS = include/common.h \
+                 include/config.h \
+                 include/serial.h \
+                 include/modem.h \
+                 include/telnet.h \
+                 include/bridge.h \
+                 include/datalog.h \
+                 include/healthcheck.h  # ← 추가
+       ```
+
+[12-13] 테스트 시나리오
+       1. Serial port 없이 시작
+          - 서버는 정상 시작
+          - 10초마다 재시도 로그 출력
+          - Serial port 연결 시 자동으로 사용 시작
+
+       2. Serial port 연결 후 제거
+          - 연결 끊김 감지
+          - 10초마다 재시도 시작
+          - 재연결 시 자동 복구
+
+       3. Telnet 서버 다운 상태에서 시작
+          - Health check: WARNING
+          - 서버는 정상 시작
+          - ATA 명령 시 telnet 연결 시도
+          - 실패하면 NO CARRIER
+          - Telnet 서버 시작 후 다음 ATA에서 성공
+
+       4. 모든 리소스 준비 안 된 상태
+          - Health check: 모두 WARNING/ERROR
+          - 서버는 정상 시작
+          - Serial port 연결되면 동작 시작
+          - ATA 시 Telnet 연결 시도
+
+
+구현 완료 내역:
+-------------
+✅ [12-1] Bridge context 수정 - include/bridge.h에 retry state 추가
+✅ [12-2] bridge_start() Non-blocking 수정 - 항상 SUCCESS 반환
+✅ [12-3] bridge_run() Serial 재시도 로직 - 10초 간격 자동 재시도
+✅ [12-4] bridge_process_serial_data() 에러 처리 - DISCONNECTED 상태 전환
+✅ [12-5] Telnet 연결 동작 유지 - ATA 명령마다 재시도
+✅ [12-6~10] Health check 모듈 완전 구현 - healthcheck.h, healthcheck.c
+✅ [12-11] main.c 통합 - config_print() 직후 health check 실행
+✅ [12-12] Makefile 업데이트 - healthcheck.c 추가, obj 디렉터리 구조 변경
+✅ [12-13] 기본 테스트 완료 - DISCONNECTED 상태 동작 확인
+
+추가 완료:
+✅ Makefile obj 디렉터리 위치 변경 (build/obj → obj)
+
+
+동작 흐름:
+---------
+
+서버 시작:
+```
+1. config_load() → 설정 파일 읽기
+2. config_print() → 설정 출력
+3. healthcheck_run() → 진단 (한 번만)
+   ├─ Serial port 체크
+   ├─ Modem 응답 체크 (선택)
+   └─ Telnet 서버 체크 (한 번만!)
+4. bridge_start() → 항상 성공!
+   ├─ Serial port 시도
+   │  ├─ 성공 → modem_init()
+   │  └─ 실패 → serial_ready = false
+   └─ running = true
+5. 메인 루프 시작
+```
+
+메인 루프 (상태별 동작):
+```
+while (g_running) {
+    bridge_run() {
+        /* === DISCONNECTED 상태 처리 === */
+        if (!serial_ready) {
+            time_t now = time(NULL);
+
+            /* 10초마다 device 파일 존재 확인 */
+            if (now - last_serial_retry >= 10) {
+                last_serial_retry = now;
+
+                /* Device 파일 존재 확인 (access 사용) */
+                if (access(serial_port, F_OK) == 0) {
+                    /* Serial port open 시도 */
+                    if (serial_open() == SUCCESS) {
+                        serial_ready = true;
+
+                        /* Modem 초기화 (health check 안 함) */
+                        modem_init();
+                        modem_ready = true;
+
+                        /* → READY 상태로 전환 */
+                        MB_LOG_INFO("Transitioned to READY state");
+                    }
+                }
+            }
+
+            /* 아직 DISCONNECTED면 대기 후 리턴 */
+            if (!serial_ready) {
+                usleep(100000);  // 100ms
+                return SUCCESS;
+            }
+        }
+
+        /* === READY/ONLINE 상태 처리 === */
+        // Serial port 있으면 정상 동작
+        select() {
+            serial_fd 대기
+            telnet_fd 대기 (ONLINE 상태일 때만)
+        }
+
+        if (serial 데이터) {
+            ret = bridge_process_serial_data() {
+                n = serial_read();
+
+                /* I/O 오류 실시간 감지 */
+                if (n < 0) {
+                    MB_LOG_ERROR("Serial I/O error detected");
+
+                    /* Telnet 종료 (ONLINE 상태였으면) */
+                    if (telnet_is_connected()) {
+                        telnet_close();
+                    }
+
+                    /* Serial 종료 */
+                    serial_close();
+
+                    /* → DISCONNECTED 상태로 전환 */
+                    serial_ready = false;
+                    modem_ready = false;
+                    last_serial_retry = time(NULL);
+
+                    MB_LOG_WARNING("Transitioned to DISCONNECTED state");
+                    return ERROR_IO;
+                }
+
+                /* 정상 데이터 처리 */
+                modem_process_input()
+
+                if (ATA 명령) {
+                    /* telnet 연결 시도 */
+                    if (telnet_connect() == SUCCESS) {
+                        /* → ONLINE 상태로 전환 */
+                        MB_LOG_INFO("Transitioned to ONLINE state");
+                    } else {
+                        /* READY 상태 유지 */
+                        modem_send_response(NO_CARRIER);
+                    }
+                }
+            }
+        }
+
+        if (telnet 데이터) {
+            ret = bridge_process_telnet_data() {
+                n = telnet_recv();
+
+                /* Telnet 연결 종료 감지 */
+                if (n <= 0) {
+                    MB_LOG_INFO("Telnet connection closed");
+
+                    /* Telnet 종료 */
+                    telnet_close();
+
+                    /* Serial은 유지 */
+                    modem_send_response(NO_CARRIER);
+
+                    /* → READY 상태로 복귀 */
+                    MB_LOG_INFO("Transitioned back to READY state");
+                    return SUCCESS;
+                }
+
+                /* 정상 데이터 처리 */
+                // ...
+            }
+        }
+    }
+}
+```
+
+상태 전환 정리:
+- DISCONNECTED: serial_ready = false, modem_ready = false
+- READY: serial_ready = true, modem_ready = true, telnet 연결 없음
+- ONLINE: serial_ready = true, modem_ready = true, telnet 연결됨
+
+
+Phase 1-11: 완료
+================
+[1-1] ✅ 디렉토리 구조 생성
+[1-2] ✅ 빌드 시스템 구축
+[1-3] ✅ 기본 헤더 파일 작성
+[2-1] ✅ 설정 구조체 정의
+[2-2] ✅ 설정 파일 파서 구현
+[3-1] ✅ Serial Port 초기화
+[3-2] ✅ Serial Port 읽기/쓰기 함수
+[4-1] ✅ Hayes AT 명령어 처리
+[4-2] ✅ Modem Handshake 구현
+[4-3] ✅ Connection 상태 관리
+[5-1] ✅ Telnet 연결 구현
+[5-2] ✅ Telnet 프로토콜 처리
+[5-3] ✅ Telnet 제어 코드 필터링
+[6-1] ✅ ANSI 이스케이프 시퀀스 파서
+[6-2] ✅ 양방향 ANSI 처리
+[7-1] ✅ I/O 멀티플렉싱
+[7-2] ✅ 양방향 데이터 전송
+[7-3] ✅ 버퍼 관리
+[7-4] ✅ Multibyte 문자 처리
+[8-1] ✅ Modem 연결 종료 시나리오
+[8-2] ✅ Telnet 연결 종료 시나리오
+[8-3] ✅ 리소스 정리
+[9-1] ✅ Daemon 기본 기능
+[9-2] ✅ 초기화 및 메인 루프
+[9-3] ✅ 에러 처리 및 복구
+[10-1] ✅ 단위 테스트
+[10-2] ✅ 통합 테스트
+[10-3] ✅ 디버깅 모드
+[11-1] ✅ 사용자 문서
+[11-2] ✅ 개발자 문서
+[11-3] ✅ 배포 준비
+
+
+프로젝트 완료 현황:
+==================
+
+**완료된 Phase:**
+- Phase 1-9: 핵심 기능 구현 (Serial, Modem, Telnet, Bridge, ANSI, Multibyte)
+- Phase 10: 통합 테스트 및 디버깅
+- Phase 12: Resilient Architecture + Health Check
+
+**주요 기능:**
+✅ Hayes AT 명령어 세트 완전 지원
+✅ Telnet RFC 854 완전 준수
+✅ ANSI 이스케이프 시퀀스 필터링
+✅ UTF-8 멀티바이트 문자 안전 처리
+✅ 데이터 로깅 시스템
+✅ Health Check 진단 시스템
+✅ Resilient Architecture (리소스 동적 감지 및 자동 복구)
+✅ Non-blocking 시작 (리소스 없어도 서버 시작)
+✅ 10초 간격 Serial port 자동 재시도
+✅ I/O 오류 실시간 감지 및 자동 복구
+
+**다음 단계 (선택 사항):**
+- ✅ Phase 11: 문서화 개선 (사용자 가이드, API 문서) (완료)
+- ✅ Phase 13: MODEM_COMMAND 기능 추가 (완료)
+- ✅ Phase 14: Serial Port 명시적 초기화 단계 추가 (완료)
+- ✅ Phase 15: BBS 호스트 모드 지원 (DTR/DCD 관리, 자동응답) (완료)
+- ✅ Phase 16: 추가 AT 명령어 구현 (완료)
+- [ ] Phase 17: 프로덕션 배포 (systemd service, 패키징)
+
+
+Phase 13: MODEM_COMMAND 기능 추가 (완료)
+=========================================
+
+목표:
+-----
+Health check 시 modem에 초기화 명령을 전송하고 응답을 확인하는 기능 추가
+
+요구사항:
+---------
+1. modembridge.conf에 MODEM_COMMAND 항목 추가
+2. Health check 시 AT 명령 전송 및 응답 출력
+3. MODEM_COMMAND에 지정된 명령들을 순차적으로 전송
+4. 각 명령의 응답을 표준 출력으로 출력
+5. Health check 재실행 시 위 과정도 재실행
+
+MODEM_COMMAND 문자열 규칙:
+-------------------------
+- ";" 문자로 여러 AT 명령 구분
+- 예: "AT&C1 B0 X3; ATS0=1H0" → 2개의 명령
+  - 명령 1: AT&C1 B0 X3
+  - 명령 2: ATS0=1H0
+- modem에 전송할 때는 ";"를 제거하고 각 명령에 "\r\n" 추가
+
+구현 계획:
+---------
+
+[13-1] config.h 수정 - MODEM_COMMAND 필드 추가
+      파일: include/config.h
+
+      config_t 구조체에 추가:
+      ```c
+      char modem_command[LINE_BUFFER_SIZE];  // MODEM_COMMAND 설정값
+      ```
+
+[13-2] config.c 수정 - 초기화 및 파싱
+      파일: src/config.c
+
+      1. config_init()에 기본값 초기화:
+         ```c
+         cfg->modem_command[0] = '\0';  // 빈 문자열
+         ```
+
+      2. parse_config_line()에 파싱 로직 추가:
+         ```c
+         else if (strcasecmp(key, "MODEM_COMMAND") == 0) {
+             SAFE_STRNCPY(cfg->modem_command, value, sizeof(cfg->modem_command));
+             MB_LOG_DEBUG("Modem command configured: %s", cfg->modem_command);
+         }
+         ```
+
+[13-3] healthcheck.c 수정 - 헬퍼 함수 추가
+      파일: src/healthcheck.c
+      위치: healthcheck_modem_device() 함수 앞
+
+      1. send_at_command_and_wait() 함수:
+         - AT 명령 전송 및 응답 수신
+         - 타임아웃 처리
+         - 반환: 수신한 바이트 수 (0=timeout, -1=error)
+
+      2. parse_modem_commands() 함수:
+         - 세미콜론으로 분리된 명령 파싱
+         - 공백 제거 (trim_whitespace 사용)
+         - 반환: 파싱된 명령 개수
+
+[13-4] healthcheck.c 수정 - healthcheck_modem_device() 재작성
+      파일: src/healthcheck.c
+
+      새로운 동작:
+      1. Serial port 임시 오픈
+      2. AT 명령 전송 및 응답 출력
+      3. MODEM_COMMAND 파싱
+      4. 각 명령 순차 전송 및 응답 출력
+      5. Serial port 닫기
+
+      출력 형식:
+      ```
+      === Modem Command Execution ===
+      Sending: AT
+      Response: OK
+
+      --- Executing MODEM_COMMAND ---
+      Raw MODEM_COMMAND: AT&C1 B0 X3; ATS0=1H0
+
+      Command 1/2: AT&C1 B0 X3
+      Response: OK
+
+      Command 2/2: ATS0=1H0
+      Response: OK
+
+      Total commands sent: 2
+      ================================
+      ```
+
+[13-5] 테스트 시나리오
+      1. 정상 동작: MODEM_COMMAND="AT&C1; ATE1; ATZ"
+      2. 빈 설정: MODEM_COMMAND=""
+      3. 설정 없음: 항목 자체가 없는 경우
+      4. 공백 처리: "AT&C1  ;  ATE1  ;  ATZ"
+      5. Modem 미응답: timeout 메시지 출력
+
+파일 수정 요약:
+-------------
+| 파일                     | 수정 내용                                    |
+|--------------------------|---------------------------------------------|
+| include/config.h         | config_t에 modem_command 필드 추가          |
+| src/config.c             | 초기화 + 파싱 로직 추가                     |
+| src/healthcheck.c        | 헬퍼 함수 2개 + healthcheck_modem_device() 재작성 |
+
+구현 완료 내역:
+-------------
+✅ [13-1] config.h 수정 - config_t에 modem_command 필드 추가
+✅ [13-2] config.c 수정 - 초기화 및 파싱 로직 추가
+✅ [13-3] healthcheck.c 헬퍼 함수 추가 - send_at_command_and_wait(), parse_modem_commands()
+✅ [13-4] healthcheck.c modem_device 체크 로직 수정 - AT 전송 + MODEM_COMMAND 처리
+✅ [13-5] 컴파일 및 테스트 - 빌드 성공 (gcc -Wall -Wextra -Werror)
+
+참고 문서:
+---------
+자세한 구현 계획은 MODEM_COMMAND_PLAN.md 참조
+
+Phase 14: Serial Port 명시적 초기화 단계 추가 (진행 중)
+======================================================
+
+목표:
+-----
+Health check 과정에서 serial port 체크와 modem 체크 사이에 명시적인 serial port 
+초기화 단계를 추가하여, 설정 내용을 사용자에게 명확히 보여줍니다.
+
+현재 문제점:
+-----------
+1. healthcheck_serial_port(): 파일 존재/권한만 체크
+2. healthcheck_modem_device(): 내부적으로 serial_open() → AT 체크 → serial_close()
+3. 사용자는 어떤 설정으로 serial port가 초기화되는지 알 수 없음
+
+개선 방안:
+---------
+Serial Port 체크 → Serial Port 초기화 → Modem 체크 의 3단계 흐름 구성
+
+새로운 Health Check 흐름:
+------------------------
+1. healthcheck_serial_port()
+   - Device 파일 존재 확인
+   - Character device 확인
+   - 읽기/쓰기 권한 확인
+
+2. [NEW] healthcheck_serial_init()
+   - Serial port를 config 설정으로 초기화
+   - termios 설정 적용
+   - 적용된 설정 출력 (baudrate, data bits, parity, stop bits, flow control)
+
+3. healthcheck_modem_device()
+   - AT 명령 체크 (기존과 동일)
+
+구현 계획:
+---------
+
+[14-1] health_report_t 구조체 수정
+      파일: include/healthcheck.h
+      
+      추가 필드:
+      ```c
+      typedef struct {
+          health_check_result_t serial_port;
+          health_check_result_t serial_init;    // ← 추가
+          health_check_result_t modem_device;
+          health_check_result_t telnet_server;
+      } health_report_t;
+      ```
+
+[14-2] healthcheck_serial_init() 함수 추가
+      파일: src/healthcheck.c
+      
+      기능:
+      - serial_open()으로 port 초기화
+      - termios 설정 적용 (config 기반)
+      - 설정 정보를 result->message에 저장
+        예: "Serial port initialized: 9600 baud, 8N1, flow=NONE"
+      - serial_close()로 닫기
+
+[14-3] healthcheck_run() 수정
+      파일: src/healthcheck.c
+      
+      수정 내용:
+      ```c
+      /* Check serial port */
+      healthcheck_serial_port(cfg->serial_port, &report->serial_port);
+      
+      /* Initialize serial port (only if accessible) */
+      if (report->serial_port.status == HEALTH_STATUS_OK) {
+          healthcheck_serial_init(cfg->serial_port, cfg, &report->serial_init);
+      } else {
+          report->serial_init.status = HEALTH_STATUS_ERROR;
+          // ...
+      }
+      
+      /* Check modem device (only if init succeeded) */
+      if (report->serial_init.status == HEALTH_STATUS_OK) {
+          healthcheck_modem_device(cfg->serial_port, cfg, &report->modem_device);
+      } else {
+          report->modem_device.status = HEALTH_STATUS_ERROR;
+          // ...
+      }
+      ```
+
+[14-4] healthcheck_print_report() 수정
+      파일: src/healthcheck.c
+      
+      추가 출력 섹션:
+      ```
+      Serial Initialization:
+        Status: OK
+        Serial port initialized: 9600 baud, 8N1, flow=NONE
+      ```
+
+예상 출력:
+---------
+```
+=== Health Check ===
+
+Serial Port:
+  Status: OK
+  Device exists and accessible: /dev/ttyUSB0
+
+Serial Initialization:
+  Status: OK
+  Serial port initialized: 9600 baud, 8N1, flow=NONE
+
+Modem Device:
+  Status: OK
+  Modem responded to AT command
+
+  === Modem Command Execution ===
+  ...
+```
+
+구현 완료 내역:
+-------------
+✅ [14-1] health_report_t에 serial_init 필드 추가
+✅ [14-2] healthcheck_serial_init() 함수 구현
+✅ [14-3] healthcheck_run() 흐름 수정
+✅ [14-4] healthcheck_print_report() 출력 수정
+✅ [14-5] 컴파일 및 테스트 - 빌드 성공 (gcc -Wall -Wextra -Werror)
+
+참고 문서:
+---------
+자세한 구현 계획은 SERIAL_INIT_PLAN.md 참조
+
+
+Phase 15: BBS 호스트 모드 지원 (DTR/DCD 관리, 자동응답)
+=======================================================
+
+목표:
+-----
+BBS 호스트 프로그램으로 동작할 수 있도록 DTR/DCD 신호 관리, 지속적인 serial port
+유지, 자동응답 모드 개선을 통해 "RING → ATA → CONNECT" 흐름에서 끊김 없이
+세션을 유지할 수 있도록 개선합니다.
+
+현재 문제점 분석:
+----------------
+
+**1. Health Check 시 Serial Port 반복 열기/닫기**
+   - 현재: healthcheck_serial_init(), healthcheck_modem_device(),
+     healthcheck_print_report()에서 각각 serial_open() → serial_close()
+   - 문제: DTR이 반복적으로 올라갔다 내려가면서 모뎀이 불안정해질 수 있음
+   - 영향: Health check 중 H0 명령과 DTR 하강이 겹치면 즉시 끊김 발생 가능
+
+**2. MODEM_COMMAND 타이밍 문제**
+   - 현재: "AT&C1 B0 X3 S7=60 S10=7; ATS0=2H0"를 세미콜론으로 분리하여 전송
+   - 문제: H0가 S0=2와 함께 전송되면 자동응답 설정 직후 온훅 상태로 전환
+   - 권장: H0는 초기화 시점에만 사용하고, 자동응답 설정과 분리
+
+**3. Serial Port 설정에서 DTR 제어 누락**
+   - 현재: serial_configure()에서 CLOCAL 플래그 사용 (modem control lines 무시)
+   - 문제: DTR을 명시적으로 제어하지 않아 호스트가 DTR을 유지해야 하는 상황에서 불안정
+   - 권장: CLOCAL 제거하고 DTR을 명시적으로 HIGH로 유지
+
+**4. 자동응답 후 상태 전환 미흡**
+   - 현재: ATA 명령 → bridge_handle_modem_connect() → telnet_connect()
+   - 문제: ATA 실행 직후 telnet 연결 시도하므로 모뎀이 RING 신호를 받고 응답하는
+     시나리오(자동응답)가 고려되지 않음
+   - 필요: RING 신호 감지 → 자동 ATA 실행 → CONNECT 대기 흐름 지원
+
+**5. DCD 신호 모니터링 부재**
+   - 현재: DCD(Carrier Detect) 상태를 확인하는 로직이 없음
+   - 문제: 캐리어 상실 시 세션 종료를 감지하지 못함
+   - 권장: &C1 설정 시 DCD 신호를 주기적으로 확인하여 캐리어 상실 감지
+
+
+주요 원인 요약 (사용자 제공):
+--------------------------
+
+1. **H0 타이밍 문제**
+   - H0를 벨 수 설정과 함께 보내면 통화 중에도 H0가 실행될 경우 즉시 온훅으로 전환되어 끊김
+
+2. **DTR 관리 부족**
+   - &D2 설정에서 DTR이 내려가면 모뎀이 즉시 끊으므로, 호스트가 포트를 열고 DTR을
+     유지하지 않으면 응답 직후 드롭 발생
+
+3. **DCD 연동 누락**
+   - &C1로 DCD를 캐리어에 연동하지 않으면 호스트가 캐리어 유무를 오인해 포트를
+     닫거나 세션을 정리하면서 끊김 유발
+
+4. **S7 캐리어 대기 시간 부족**
+   - S7이 짧으면 상대 모뎀의 협상이 느릴 때 응답 후 캐리어 미검출로 타임아웃 끊김
+
+
+권장 모뎀 설정 (사용자 제공):
+---------------------------
+
+**자동응답:**
+- ATS0=2로 두고, H0는 초기화 시점에만 사용
+- 통화 중에는 H0를 보내지 않도록 분리
+
+**회선 신호:**
+- AT&C1 (캐리어 연동)
+- AT&D2 (DTR 하강 시 끊기)
+- 호스트 제어와 실제 회선 상태를 일치시킴
+
+**시간값:**
+- ATS7=60 (최대 60초 대기)
+- ATS10=7 (캐리어 상실 후 끊기 지연)
+- 협상 여유를 둠
+
+
+서버 프로그램 측 요구사항 (사용자 제공):
+--------------------------------------
+
+**Serial Port 관리:**
+- Serial 포트를 지속적으로 연 상태로 유지
+- DTR을 HIGH로 유지 (옵션으로 "Drop DTR to hang up" 사용)
+- RING/CONNECT 메시지를 수신해 상태를 추적
+- 자동응답 모드에서는 ATA를 중복 전송하지 않음
+
+**세션 관리:**
+- DCD가 올라온 후에만 세션 시작
+- DCD가 내려가면 세션 종료
+- 회선 상태와 프로그램 상태를 일치시킴
+
+**초기화 문자열 관리:**
+- 초기화 문자열을 주기적으로 재전송하지 말 것
+- 특히 RING/CONNECT 동안에는 H0가 포함된 문자열을 보내지 않도록 함
+
+
+구현 계획:
+---------
+
+[15-1] MODEM_COMMAND 분리 - 초기화 명령과 자동응답 명령 분리
+      파일: include/config.h, src/config.c, modembridge.conf
+
+      목표: H0를 자동응답 설정과 분리하여 Health check에서만 실행
+
+      변경사항:
+      ```c
+      // include/config.h
+      typedef struct {
+          // ... 기존 필드들
+          char modem_init_command[LINE_BUFFER_SIZE];     // 초기화 명령 (H0 포함)
+          char modem_autoanswer_command[LINE_BUFFER_SIZE]; // 자동응답 명령 (S0=n)
+      } config_t;
+      ```
+
+      modembridge.conf:
+      ```
+      # Health check에서만 실행 (H0 포함 가능)
+      MODEM_INIT_COMMAND="ATH0; AT&C1 &D2 B0 X3 S7=60 S10=7"
+
+      # 서버 시작 후 자동응답 설정 (H0 없음!)
+      MODEM_AUTOANSWER_COMMAND="ATS0=2"
+      ```
+
+[15-2] Serial Port DTR 명시적 제어
+      파일: src/serial.c
+
+      목표: Serial port 열 때 DTR을 명시적으로 HIGH로 설정하고 유지
+
+      serial_configure() 수정:
+      ```c
+      int serial_configure(serial_port_t *port, ...)
+      {
+          struct termios newtio;
+
+          // ...
+
+          /* CLOCAL 제거 - modem control lines 사용 */
+          newtio.c_cflag = CREAD;  // CLOCAL 제거!
+
+          // ... (나머지 설정)
+
+          /* Apply settings */
+          if (tcsetattr(port->fd, TCSANOW, &newtio) < 0) {
+              return ERROR_IO;
+          }
+
+          /* 명시적으로 DTR HIGH 설정 */
+          serial_set_dtr(port, true);
+          MB_LOG_INFO("DTR set to HIGH (modem ready)");
+
+          return SUCCESS;
+      }
+      ```
+
+      serial_close() 수정:
+      ```c
+      int serial_close(serial_port_t *port)
+      {
+          // ...
+
+          /* DTR을 내려서 모뎀에게 끊기 신호 전달 (&D2 설정 시) */
+          serial_set_dtr(port, false);
+          MB_LOG_INFO("DTR set to LOW (closing port)");
+
+          /* Restore original terminal settings */
+          tcsetattr(port->fd, TCSANOW, &port->oldtio);
+
+          // ...
+      }
+      ```
+
+[15-3] Health Check에서 Serial Port 지속 유지
+      파일: src/healthcheck.c
+
+      목표: Health check 전체 과정 동안 serial port를 한 번만 열고 유지
+
+      healthcheck_run() 수정:
+      ```c
+      int healthcheck_run(const config_t *cfg, health_report_t *report)
+      {
+          serial_port_t port;
+          bool port_opened = false;
+
+          memset(report, 0, sizeof(health_report_t));
+
+          /* Check serial port (파일 존재/권한만 체크) */
+          healthcheck_serial_port(cfg->serial_port, &report->serial_port);
+
+          /* Serial port 한 번만 열기 */
+          if (report->serial_port.status == HEALTH_STATUS_OK) {
+              serial_init(&port);
+              if (serial_open(&port, cfg->serial_port, cfg) == SUCCESS) {
+                  port_opened = true;
+                  report->serial_init.status = HEALTH_STATUS_OK;
+                  snprintf(report->serial_init.message, ...);
+              } else {
+                  report->serial_init.status = HEALTH_STATUS_ERROR;
+              }
+          }
+
+          /* Modem check (port가 열려있으면 그대로 사용) */
+          if (port_opened) {
+              healthcheck_modem_device_with_port(&port, cfg, &report->modem_device);
+          }
+
+          /* Telnet check */
+          healthcheck_telnet_server(...);
+
+          /* MODEM_INIT_COMMAND 실행 (port가 열려있으면) */
+          if (port_opened && cfg->modem_init_command[0] != '\0') {
+              healthcheck_execute_init_commands(&port, cfg);
+          }
+
+          /* 여기서 한 번만 닫기 */
+          if (port_opened) {
+              serial_close(&port);
+          }
+
+          return SUCCESS;
+      }
+      ```
+
+[15-4] 서버 시작 후 자동응답 명령 전송
+      파일: src/bridge.c
+
+      목표: Health check 완료 후 서버가 serial port를 열고 자동응답 설정
+
+      bridge_start() 수정:
+      ```c
+      int bridge_start(bridge_ctx_t *ctx)
+      {
+          // ... (기존 serial_open 로직)
+
+          if (ret == SUCCESS) {
+              ctx->serial_ready = true;
+
+              /* Initialize modem */
+              modem_init(&ctx->modem, &ctx->serial);
+              ctx->modem_ready = true;
+
+              /* 자동응답 명령 전송 (H0 없음!) */
+              if (ctx->config->modem_autoanswer_command[0] != '\0') {
+                  MB_LOG_INFO("Sending auto-answer command: %s",
+                             ctx->config->modem_autoanswer_command);
+
+                  char cmd_with_at[LINE_BUFFER_SIZE];
+                  snprintf(cmd_with_at, sizeof(cmd_with_at), "AT%s\r\n",
+                          ctx->config->modem_autoanswer_command);
+
+                  serial_write(&ctx->serial,
+                              (const unsigned char *)cmd_with_at,
+                              strlen(cmd_with_at));
+
+                  /* 응답 대기 (간단히) */
+                  usleep(500000);  // 500ms
+                  unsigned char response[SMALL_BUFFER_SIZE];
+                  serial_read(&ctx->serial, response, sizeof(response));
+              }
+
+              MB_LOG_INFO("Serial port opened, DTR HIGH, auto-answer configured");
+          }
+
+          // ...
+      }
+      ```
+
+[15-5] DCD 신호 모니터링 추가
+      파일: src/bridge.c
+
+      목표: ONLINE 상태에서 DCD 신호를 주기적으로 확인
+
+      bridge_run()에 DCD 체크 추가:
+      ```c
+      int bridge_run(bridge_ctx_t *ctx)
+      {
+          // ... (기존 select 로직)
+
+          /* ONLINE 상태에서 DCD 확인 (&C1 설정 시) */
+          if (ctx->state == STATE_CONNECTED &&
+              ctx->serial_ready &&
+              modem_is_online(&ctx->modem)) {
+
+              bool dcd_state = false;
+              if (serial_get_dcd(&ctx->serial, &dcd_state) == SUCCESS) {
+                  if (!dcd_state) {
+                      /* DCD가 내려감 - 캐리어 상실 */
+                      MB_LOG_WARNING("DCD lost - carrier lost, disconnecting");
+
+                      /* Telnet 종료 */
+                      if (telnet_is_connected(&ctx->telnet)) {
+                          telnet_disconnect(&ctx->telnet);
+                      }
+
+                      /* Modem 끊기 */
+                      modem_hangup(&ctx->modem);
+                      modem_send_no_carrier(&ctx->modem);
+
+                      ctx->state = STATE_IDLE;
+                  }
+              }
+          }
+
+          // ...
+      }
+      ```
+
+[15-6] RING 신호 처리 (향후 확장)
+      파일: src/modem.c
+
+      목표: Serial port에서 "RING" 문자열 감지 시 자동으로 ATA 처리
+
+      현재는 수동 ATA만 지원하므로, 실제 모뎀 RING 신호는 모뎀의
+      자동응답 기능(S0=n)에 의존함. 향후 필요 시 구현.
+
+
+구현 우선순위:
+------------
+
+**즉시 구현 필요 (Critical):**
+[15-1] MODEM_COMMAND 분리 - H0 타이밍 문제 해결
+[15-2] DTR 명시적 제어 - DTR 유지 보장
+[15-3] Health Check Serial Port 지속 - DTR 반복 하강 방지
+
+**중요 (High):**
+[15-4] 자동응답 명령 분리 전송 - 서버 시작 후 안전하게 설정
+[15-5] DCD 모니터링 - 캐리어 상실 감지
+
+**선택 (Low):**
+[15-6] RING 신호 처리 - 현재는 모뎀 자동응답으로 충분
+
+
+테스트 시나리오:
+--------------
+
+1. **DTR 유지 확인**
+   - 서버 시작 → Health check 완료 → DTR 상태 확인
+   - 예상: DTR이 Health check 전체 동안 HIGH 유지
+   - 확인: `stty -F /dev/ttyUSB0 -a` 또는 serial 신호 모니터링
+
+2. **자동응답 설정 확인**
+   - 서버 시작 → ATS0=2 전송 확인
+   - 모뎀에 "ATS0?" 전송하여 값 확인
+   - 예상: S0=2로 설정됨
+
+3. **H0 분리 확인**
+   - Health check 로그에서 H0 실행 확인
+   - 서버 동작 중에는 H0 전송되지 않음 확인
+   - 예상: Health check에서만 H0 실행
+
+4. **DCD 모니터링 확인**
+   - ONLINE 상태에서 모뎀 케이블 분리
+   - 예상: DCD 상실 감지 → NO CARRIER → STATE_IDLE 전환
+
+5. **통화 유지 테스트**
+   - 실제 dialup 연결 → CONNECT → 데이터 전송
+   - 예상: 자동응답 후 끊김 없이 세션 유지
+
+
+예상 출력:
+---------
+
+```
+=== Health Check ===
+
+Serial Port:
+  Status: OK
+  Device exists and accessible: /dev/ttyUSB0
+
+Serial Initialization:
+  Status: OK
+  Serial port initialized: 9600 baud, 8N1, flow=NONE
+  DTR set to HIGH
+
+Modem Device:
+  Status: OK
+  Modem responded to AT command
+
+  === Modem Init Command Execution ===
+  Sending: AT
+  Response (6 bytes): [HEX: 0D 0A 4F 4B 0D 0A ] [ASCII: OK]
+
+  --- Executing MODEM_INIT_COMMAND ---
+  Raw MODEM_INIT_COMMAND: ATH0; AT&C1 &D2 B0 X3 S7=60 S10=7
+
+  Command 1/2: ATH0
+  Response (6 bytes): [HEX: 0D 0A 4F 4B 0D 0A ] [ASCII: OK]
+
+  (2초 대기)
+
+  Command 2/2: AT&C1 &D2 B0 X3 S7=60 S10=7
+  Response (6 bytes): [HEX: 0D 0A 4F 4B 0D 0A ] [ASCII: OK]
+
+  Total commands sent: 2
+  ================================
+
+Telnet Server:
+  Status: OK
+  Connected: 127.0.0.1:8882
+====================
+
+Bridge started (READY state), waiting for modem commands
+Sending auto-answer command: ATS0=2
+Serial port opened, DTR HIGH, auto-answer configured
+```
+
+
+참고 문서:
+---------
+- CLOCAL vs DTR control: https://man7.org/linux/man-pages/man3/termios.3.html
+- Hayes AT Command Reference
+- BBS Host Configuration Best Practices
+
+
+Phase 16: 추가 AT 명령어 구현
+==============================
+
+목표:
+-----
+Hayes AT 명령어 세트를 확장하여 BBS 및 dialup 환경에서 자주 사용되는
+추가 명령어들을 구현합니다.
+
+현재 구현된 AT 명령어:
+--------------------
+✅ AT - 기본 테스트 명령어
+✅ ATA - Answer (전화 받기)
+✅ ATD - Dial (다이얼, 미구현이지만 OK 반환)
+✅ ATE[n] - Echo 제어
+✅ ATH[n] - Hang up (전화 끊기)
+✅ ATI[n] - Information (버전 정보)
+✅ ATO[n] - Return to Online mode
+✅ ATQ[n] - Quiet mode
+✅ ATS[n]=[val] - S-register 설정
+✅ ATS[n]? - S-register 조회
+✅ ATV[n] - Verbose mode
+✅ ATZ[n] - Reset
+✅ AT&F - Factory defaults
+
+추가 구현할 AT 명령어:
+--------------------
+
+**고우선순위 (High Priority):**
+1. **AT&C[n]** - Carrier Detect (DCD) 제어
+   - &C0: DCD 항상 ON
+   - &C1: DCD는 원격 캐리어 상태를 반영 (권장)
+
+2. **AT&D[n]** - DTR 동작 제어
+   - &D0: DTR 무시
+   - &D1: DTR OFF → 명령 모드 전환
+   - &D2: DTR OFF → 전화 끊고 명령 모드 (권장)
+   - &D3: DTR OFF → 모뎀 리셋
+
+3. **ATB[n]** - Communication Standard (Bell/CCITT)
+   - B0: CCITT (V.22 등)
+   - B1: Bell (212A 등)
+
+4. **ATX[n]** - Extended Result Codes
+   - X0: 기본 (OK, CONNECT, RING, NO CARRIER, ERROR)
+   - X1: X0 + connection speed
+   - X2: X1 + NO DIALTONE
+   - X3: X1 + BUSY
+   - X4: X2 + X3 (모든 확장 코드)
+
+**중우선순위 (Medium Priority):**
+5. **AT&V** - View Configuration
+   - 현재 설정 출력
+   - S-register 값 표시
+   - 저장된 프로파일 표시
+
+6. **AT&W[n]** - Write Configuration
+   - 현재 설정을 NVRAM에 저장 (메모리에만)
+   - n = 프로파일 번호 (0-1)
+
+7. **ATL[n]** - Speaker Volume
+   - L0: Low
+   - L1: Low
+   - L2: Medium
+   - L3: High
+
+8. **ATM[n]** - Speaker Control
+   - M0: Speaker always off
+   - M1: Speaker on until carrier detected
+   - M2: Speaker always on
+   - M3: Speaker on after dialing, off when carrier detected
+
+**저우선순위 (Low Priority):**
+9. **AT\\N[n]** - Error Correction Mode
+   - \\N0: Normal mode (no error correction)
+   - \\N1: Direct mode
+   - \\N2: Reliable mode (MNP)
+   - \\N3: Auto reliable mode
+
+10. **AT&S[n]** - DSR Override
+    - &S0: DSR always on
+    - &S1: DSR tracks modem state
+
+
+구현 계획:
+---------
+
+[16-1] modem_settings_t 구조체 확장
+      파일: include/modem.h
+
+      추가 필드:
+      ```c
+      typedef struct {
+          bool echo;                  /* Command echo (ATE) */
+          bool verbose;               /* Verbose responses (ATV) */
+          bool quiet;                 /* Quiet mode (ATQ) */
+          int s_registers[256];       /* S-registers (ATS) */
+
+          /* 새로 추가 */
+          int dcd_mode;               /* AT&C: DCD control (0=always ON, 1=follow carrier) */
+          int dtr_mode;               /* AT&D: DTR handling (0=ignore, 1=command, 2=hangup, 3=reset) */
+          int bell_mode;              /* ATB: Bell/CCITT (0=CCITT, 1=Bell) */
+          int result_mode;            /* ATX: Extended result codes (0-4) */
+          int speaker_volume;         /* ATL: Speaker volume (0-3) */
+          int speaker_control;        /* ATM: Speaker control (0-3) */
+          int error_correction;       /* AT\\N: Error correction (0-3) */
+          int dsr_mode;               /* AT&S: DSR override (0-1) */
+
+          /* 설정 저장 (AT&W) */
+          bool profile_saved[2];      /* 프로파일 0, 1 저장 여부 */
+      } modem_settings_t;
+      ```
+
+[16-2] modem_reset() 수정 - 기본값 초기화
+      파일: src/modem.c
+
+      ```c
+      void modem_reset(modem_t *modem)
+      {
+          // ... 기존 코드 ...
+
+          /* Initialize new settings with defaults */
+          modem->settings.dcd_mode = 1;           /* &C1: DCD follows carrier */
+          modem->settings.dtr_mode = 2;           /* &D2: DTR OFF = hangup */
+          modem->settings.bell_mode = 0;          /* B0: CCITT */
+          modem->settings.result_mode = 4;        /* X4: All extended codes */
+          modem->settings.speaker_volume = 2;     /* L2: Medium */
+          modem->settings.speaker_control = 1;    /* M1: On until carrier */
+          modem->settings.error_correction = 3;   /* \\N3: Auto reliable */
+          modem->settings.dsr_mode = 0;           /* &S0: DSR always on */
+
+          memset(modem->settings.profile_saved, 0, sizeof(modem->settings.profile_saved));
+
+          // ...
+      }
+      ```
+
+[16-3] modem_process_command() 확장 - 새 명령어 처리
+      파일: src/modem.c
+
+      AT&C 구현:
+      ```c
+      /* AT& commands */
+      else if (*p == '&') {
+          p++;
+          /* AT&C - DCD control */
+          if (*p == 'C') {
+              p++;
+              int val = 1;  /* Default &C1 */
+              if (isdigit(*p)) {
+                  val = *p - '0';
+                  p++;
+              }
+              if (val >= 0 && val <= 1) {
+                  modem->settings.dcd_mode = val;
+                  MB_LOG_INFO("AT command: AT&C%d (DCD mode)", val);
+              } else {
+                  return modem_send_response(modem, MODEM_RESP_ERROR);
+              }
+          }
+          /* AT&D - DTR control */
+          else if (*p == 'D') {
+              p++;
+              int val = 2;  /* Default &D2 */
+              if (isdigit(*p)) {
+                  val = *p - '0';
+                  p++;
+              }
+              if (val >= 0 && val <= 3) {
+                  modem->settings.dtr_mode = val;
+                  MB_LOG_INFO("AT command: AT&D%d (DTR mode)", val);
+              } else {
+                  return modem_send_response(modem, MODEM_RESP_ERROR);
+              }
+          }
+          /* AT&F - Factory defaults (기존) */
+          else if (*p == 'F') {
+              // ... 기존 코드 ...
+          }
+          /* AT&V - View configuration */
+          else if (*p == 'V') {
+              p++;
+              MB_LOG_INFO("AT command: AT&V (View configuration)");
+              return modem_show_configuration(modem);
+          }
+          /* AT&W - Write configuration */
+          else if (*p == 'W') {
+              p++;
+              int profile = 0;
+              if (isdigit(*p)) {
+                  profile = *p - '0';
+                  p++;
+              }
+              if (profile >= 0 && profile <= 1) {
+                  modem->settings.profile_saved[profile] = true;
+                  MB_LOG_INFO("AT command: AT&W%d (Save profile)", profile);
+              } else {
+                  return modem_send_response(modem, MODEM_RESP_ERROR);
+              }
+          }
+          /* AT&S - DSR override */
+          else if (*p == 'S') {
+              p++;
+              int val = 0;
+              if (isdigit(*p)) {
+                  val = *p - '0';
+                  p++;
+              }
+              if (val >= 0 && val <= 1) {
+                  modem->settings.dsr_mode = val;
+                  MB_LOG_INFO("AT command: AT&S%d (DSR mode)", val);
+              } else {
+                  return modem_send_response(modem, MODEM_RESP_ERROR);
+              }
+          }
+          else {
+              /* Unknown & command - skip */
+              p++;
+              if (isdigit(*p)) p++;
+          }
+      }
+      ```
+
+      ATB 구현:
+      ```c
+      /* ATB - Bell/CCITT mode */
+      else if (*p == 'B') {
+          p++;
+          int val = 0;
+          if (isdigit(*p)) {
+              val = *p - '0';
+              p++;
+          }
+          if (val >= 0 && val <= 1) {
+              modem->settings.bell_mode = val;
+              MB_LOG_INFO("AT command: ATB%d (Bell mode %s)",
+                         val, val ? "Bell 212A" : "CCITT");
+          } else {
+              return modem_send_response(modem, MODEM_RESP_ERROR);
+          }
+      }
+      ```
+
+      ATX 구현:
+      ```c
+      /* ATX - Extended result codes */
+      else if (*p == 'X') {
+          p++;
+          int val = 4;
+          if (isdigit(*p)) {
+              val = *p - '0';
+              p++;
+          }
+          if (val >= 0 && val <= 4) {
+              modem->settings.result_mode = val;
+              MB_LOG_INFO("AT command: ATX%d (Result code mode)", val);
+          } else {
+              return modem_send_response(modem, MODEM_RESP_ERROR);
+          }
+      }
+      ```
+
+      ATL, ATM 구현:
+      ```c
+      /* ATL - Speaker volume */
+      else if (*p == 'L') {
+          p++;
+          int val = 2;
+          if (isdigit(*p)) {
+              val = *p - '0';
+              p++;
+          }
+          if (val >= 0 && val <= 3) {
+              modem->settings.speaker_volume = val;
+              MB_LOG_INFO("AT command: ATL%d (Speaker volume)", val);
+          } else {
+              return modem_send_response(modem, MODEM_RESP_ERROR);
+          }
+      }
+      /* ATM - Speaker control */
+      else if (*p == 'M') {
+          p++;
+          int val = 1;
+          if (isdigit(*p)) {
+              val = *p - '0';
+              p++;
+          }
+          if (val >= 0 && val <= 3) {
+              modem->settings.speaker_control = val;
+              MB_LOG_INFO("AT command: ATM%d (Speaker control)", val);
+          } else {
+              return modem_send_response(modem, MODEM_RESP_ERROR);
+          }
+      }
+      ```
+
+      AT\N 구현 (백슬래시 명령어):
+      ```c
+      /* AT\ commands */
+      else if (*p == '\\') {
+          p++;
+          /* AT\N - Error correction */
+          if (*p == 'N') {
+              p++;
+              int val = 3;
+              if (isdigit(*p)) {
+                  val = *p - '0';
+                  p++;
+              }
+              if (val >= 0 && val <= 3) {
+                  modem->settings.error_correction = val;
+                  MB_LOG_INFO("AT command: AT\\N%d (Error correction)", val);
+              } else {
+                  return modem_send_response(modem, MODEM_RESP_ERROR);
+              }
+          }
+          else {
+              /* Unknown \ command */
+              p++;
+              if (isdigit(*p)) p++;
+          }
+      }
+      ```
+
+[16-4] modem_show_configuration() 함수 추가
+      파일: src/modem.c
+
+      ```c
+      /**
+       * Show current modem configuration (AT&V)
+       */
+      int modem_show_configuration(modem_t *modem)
+      {
+          char line[SMALL_BUFFER_SIZE];
+
+          if (modem == NULL) {
+              return ERROR_INVALID_ARG;
+          }
+
+          /* Configuration header */
+          modem_send_response_fmt(modem, "ACTIVE PROFILE:");
+
+          /* Basic settings */
+          snprintf(line, sizeof(line), "E%d Q%d V%d X%d",
+                   modem->settings.echo ? 1 : 0,
+                   modem->settings.quiet ? 1 : 0,
+                   modem->settings.verbose ? 1 : 0,
+                   modem->settings.result_mode);
+          modem_send_response_fmt(modem, "%s", line);
+
+          /* & settings */
+          snprintf(line, sizeof(line), "&C%d &D%d &S%d",
+                   modem->settings.dcd_mode,
+                   modem->settings.dtr_mode,
+                   modem->settings.dsr_mode);
+          modem_send_response_fmt(modem, "%s", line);
+
+          /* Other settings */
+          snprintf(line, sizeof(line), "B%d L%d M%d \\N%d",
+                   modem->settings.bell_mode,
+                   modem->settings.speaker_volume,
+                   modem->settings.speaker_control,
+                   modem->settings.error_correction);
+          modem_send_response_fmt(modem, "%s", line);
+
+          /* S-registers (first 16) */
+          modem_send_response_fmt(modem, "");
+          modem_send_response_fmt(modem, "S-REGISTERS:");
+          for (int i = 0; i < 16; i++) {
+              if (i % 4 == 0 && i > 0) {
+                  modem_send_response_fmt(modem, "%s", line);
+                  line[0] = '\0';
+              }
+              snprintf(line + strlen(line), sizeof(line) - strlen(line),
+                      "S%02d:%03d ", i, modem->settings.s_registers[i]);
+          }
+          if (line[0] != '\0') {
+              modem_send_response_fmt(modem, "%s", line);
+          }
+
+          return modem_send_response(modem, MODEM_RESP_OK);
+      }
+      ```
+
+[16-5] modem_send_response() 수정 - ATX 모드 지원
+      파일: src/modem.c
+
+      ATX 설정에 따라 응답 코드 변경:
+      ```c
+      int modem_send_response(modem_t *modem, const char *response)
+      {
+          // ... 기존 quiet mode 체크 ...
+
+          /* ATX mode에 따른 응답 필터링 */
+          int x_mode = modem->settings.result_mode;
+
+          /* X0: 기본 코드만 (OK, CONNECT, RING, NO CARRIER, ERROR) */
+          if (x_mode == 0) {
+              if (strcmp(response, MODEM_RESP_NO_DIALTONE) == 0 ||
+                  strcmp(response, MODEM_RESP_BUSY) == 0 ||
+                  strcmp(response, MODEM_RESP_NO_ANSWER) == 0) {
+                  /* X0 모드에서는 NO CARRIER로 대체 */
+                  response = MODEM_RESP_NO_CARRIER;
+              }
+          }
+          /* X1: X0 + connection speed (이미 지원됨) */
+          /* X2: X1 + NO DIALTONE */
+          else if (x_mode == 2) {
+              if (strcmp(response, MODEM_RESP_BUSY) == 0 ||
+                  strcmp(response, MODEM_RESP_NO_ANSWER) == 0) {
+                  response = MODEM_RESP_NO_CARRIER;
+              }
+          }
+          /* X3: X1 + BUSY */
+          else if (x_mode == 3) {
+              if (strcmp(response, MODEM_RESP_NO_DIALTONE) == 0 ||
+                  strcmp(response, MODEM_RESP_NO_ANSWER) == 0) {
+                  response = MODEM_RESP_NO_CARRIER;
+              }
+          }
+          /* X4: 모든 확장 코드 (기본 동작) */
+
+          // ... 기존 verbose/numeric 처리 ...
+      }
+      ```
+
+[16-6] DTR 처리 통합
+      파일: src/bridge.c
+
+      AT&D 설정에 따라 DTR 동작 변경:
+      - &D0: DTR 무시 (현재 동작 유지)
+      - &D1: DTR OFF → modem_go_offline() 호출
+      - &D2: DTR OFF → modem_hangup() + telnet_disconnect() (현재 구현)
+      - &D3: DTR OFF → modem_reset() 호출
+
+      bridge_run()에서 DTR 상태 모니터링:
+      ```c
+      /* DTR 모니터링 (AT&D 설정에 따라) */
+      if (ctx->serial_ready && ctx->modem.settings.dtr_mode > 0) {
+          bool dtr_state = false;
+          int status;
+
+          if (ioctl(serial_get_fd(&ctx->serial), TIOCMGET, &status) >= 0) {
+              dtr_state = (status & TIOCM_DTR) != 0;
+
+              if (!dtr_state) {
+                  /* DTR dropped */
+                  switch (ctx->modem.settings.dtr_mode) {
+                      case 1:  /* &D1: Go to command mode */
+                          if (modem_is_online(&ctx->modem)) {
+                              MB_LOG_INFO("DTR dropped (&D1), entering command mode");
+                              modem_go_offline(&ctx->modem);
+                          }
+                          break;
+
+                      case 2:  /* &D2: Hang up and go to command mode */
+                          MB_LOG_INFO("DTR dropped (&D2), hanging up");
+                          if (telnet_is_connected(&ctx->telnet)) {
+                              telnet_disconnect(&ctx->telnet);
+                          }
+                          modem_hangup(&ctx->modem);
+                          modem_send_no_carrier(&ctx->modem);
+                          ctx->state = STATE_IDLE;
+                          break;
+
+                      case 3:  /* &D3: Reset modem */
+                          MB_LOG_INFO("DTR dropped (&D3), resetting modem");
+                          if (telnet_is_connected(&ctx->telnet)) {
+                              telnet_disconnect(&ctx->telnet);
+                          }
+                          modem_reset(&ctx->modem);
+                          ctx->state = STATE_IDLE;
+                          break;
+                  }
+              }
+          }
+      }
+      ```
+
+[16-7] DCD 처리 통합
+      파일: src/bridge.c
+
+      AT&C 설정에 따라 DCD 동작 변경:
+      - &C0: DCD 항상 HIGH (serial_set_dcd는 없으므로 로깅만)
+      - &C1: DCD는 캐리어 상태 반영 (Phase 15에서 이미 구현)
+
+      bridge_run()에서 &C0 모드 처리:
+      ```c
+      /* DCD monitoring - check for carrier loss in ONLINE state */
+      if (ctx->state == STATE_CONNECTED &&
+          ctx->serial_ready &&
+          modem_is_online(&ctx->modem)) {
+
+          /* &C1: DCD follows carrier (기존 구현) */
+          if (ctx->modem.settings.dcd_mode == 1) {
+              bool dcd_state = false;
+              if (serial_get_dcd(&ctx->serial, &dcd_state) == SUCCESS) {
+                  if (!dcd_state) {
+                      MB_LOG_WARNING("DCD lost - carrier lost, disconnecting");
+                      // ... 기존 코드 ...
+                  }
+              }
+          }
+          /* &C0: DCD always on - no monitoring */
+      }
+      ```
+
+[16-8] 함수 프로토타입 추가
+      파일: include/modem.h
+
+      ```c
+      /**
+       * Show current modem configuration (AT&V)
+       * @param modem Modem structure
+       * @return SUCCESS on success, error code on failure
+       */
+      int modem_show_configuration(modem_t *modem);
+      ```
+
+
+구현 우선순위:
+------------
+
+**Phase 16-A: 핵심 명령어 (즉시 구현)**
+✅ [16-1] modem_settings_t 구조체 확장
+✅ [16-2] modem_reset() 기본값 초기화
+✅ [16-3] AT&C, AT&D, ATB, ATX 구현
+✅ [16-4] AT&V 구현 (설정 보기)
+✅ [16-5] ATX 모드에 따른 응답 필터링
+✅ [16-6] DTR 처리 통합 (AT&D)
+✅ [16-7] DCD 처리 통합 (AT&C)
+✅ [16-8] 함수 프로토타입 추가
+
+**Phase 16-B: 추가 명령어 (선택 사항)**
+- [16-9] AT&W 구현 (설정 저장)
+- [16-10] ATL, ATM 구현 (스피커 제어)
+- [16-11] AT\N 구현 (에러 정정)
+- [16-12] AT&S 구현 (DSR 제어)
+
+
+테스트 시나리오:
+--------------
+
+1. **AT&C 테스트**
+   ```
+   AT&C0     → OK
+   AT&C1     → OK
+   AT&V      → &C1 확인
+   ```
+
+2. **AT&D 테스트**
+   ```
+   AT&D0     → OK
+   AT&D2     → OK
+   AT&V      → &D2 확인
+   ```
+
+3. **ATB 테스트**
+   ```
+   ATB0      → OK (CCITT)
+   ATB1      → OK (Bell)
+   AT&V      → B0 또는 B1 확인
+   ```
+
+4. **ATX 테스트**
+   ```
+   ATX0      → OK
+   ATX4      → OK
+   AT&V      → X4 확인
+   ```
+
+5. **AT&V 테스트**
+   ```
+   AT&V      → 현재 설정 출력
+   E1 Q0 V1 X4
+   &C1 &D2 &S0
+   B0 L2 M1 \N3
+   S-REGISTERS:
+   S00:000 S01:000 S02:043 S03:013
+   ...
+   ```
+
+6. **ATX 모드별 응답 테스트**
+   ```
+   ATX0      → OK
+   ATD123    → CONNECT 또는 NO CARRIER만
+
+   ATX4      → OK
+   ATD123    → CONNECT, NO DIALTONE, BUSY, NO ANSWER 모두 가능
+   ```
+
+
+예상 출력:
+---------
+
+```
+AT&V
+ACTIVE PROFILE:
+E1 Q0 V1 X4
+&C1 &D2 &S0
+B0 L2 M1 \N3
+
+S-REGISTERS:
+S00:002 S01:000 S02:043 S03:013
+S04:010 S05:008 S06:002 S07:060
+S08:002 S09:006 S10:007 S11:095
+S12:050 S13:000 S14:000 S15:000
+
+OK
+```
+
+
+구현 완료 내역:
+-------------
+✅ [16-1] modem_settings_t 구조체 확장
+✅ [16-2] modem_reset() 기본값 초기화
+✅ [16-3] AT&C, AT&D, ATB, ATX, ATL, ATM, AT\N, AT&W, AT&S 구현
+✅ [16-4] AT&V 구현
+✅ [16-5] ATX 모드 응답 필터링
+✅ [16-8] 함수 프로토타입 추가
+✅ [16-9] 컴파일 및 테스트
+
+구현된 새로운 AT 명령어:
+- AT&C[n]: DCD 제어 (&C0=always ON, &C1=follow carrier)
+- AT&D[n]: DTR 동작 (&D0=ignore, &D1=command mode, &D2=hangup, &D3=reset)
+- ATB[n]: Bell/CCITT 모드 (B0=CCITT, B1=Bell)
+- ATX[n]: Extended result codes (X0-X4)
+- ATL[n]: Speaker volume (L0-L3)
+- ATM[n]: Speaker control (M0-M3)
+- AT\N[n]: Error correction mode (\N0-\N3)
+- AT&S[n]: DSR override (&S0-&S1)
+- AT&V: View configuration (현재 설정 출력)
+- AT&W[n]: Write configuration (프로파일 저장)
+
+참고:
+- Phase 16-A (핵심 명령어): 완료
+- Phase 16-B (DTR/DCD 통합): Phase 15에서 이미 구현됨
+  - &C1 모드: DCD 모니터링 (bridge.c에 이미 구현)
+  - &D2 모드: DTR 제어 (serial.c에 이미 구현)
+
+
+참고 문서:
+---------
+- Hayes AT Command Set Reference
+- ITU-T V.25ter Recommendation
+- Rockwell/Conexant AT Command Reference
+
+
+Phase 11: 문서화 개선 (Documentation Improvement)
+=================================================
+
+목표:
+-----
+사용자와 개발자를 위한 포괄적인 문서를 작성하여 프로젝트의 사용성과
+유지보수성을 향상시킵니다.
+
+현재 문서 상태:
+-------------
+✅ README.md - 기본 프로젝트 소개 및 사용법
+✅ CLAUDE.md - AI 어시스턴트용 개발 가이드
+✅ 기술 리뷰 문서들 (LOGIC_REVIEW.md, TELNET_RFC_COMPLIANCE_REVIEW.md 등)
+
+작성할 문서 목록 (./docs/):
+-------------------------
+
+**사용자 문서:**
+1. USER_GUIDE.md - 사용자 가이드
+2. AT_COMMANDS.md - AT 명령어 레퍼런스
+3. CONFIGURATION.md - 설정 가이드
+4. TROUBLESHOOTING.md - 문제 해결 가이드
+5. EXAMPLES.md - 사용 예제 및 시나리오
+
+**개발자 문서:**
+6. API_REFERENCE.md - API 레퍼런스
+7. ARCHITECTURE.md - 아키텍처 문서
+8. DEVELOPMENT.md - 개발 가이드
+
+구현 계획:
+---------
+
+[11-1] ✅ docs 디렉터리 생성
+[11-2] ✅ USER_GUIDE.md 작성 (사용자 가이드) - 완료
+[11-3] ✅ AT_COMMANDS.md 작성 (AT 명령어 레퍼런스) - 완료
+[11-4] ✅ CONFIGURATION.md 작성 (설정 가이드) - 완료
+[11-5] ✅ TROUBLESHOOTING.md 작성 (문제 해결) - 완료
+[11-6] ✅ EXAMPLES.md 작성 (사용 예제) - 완료
+[11-7] ✅ API_REFERENCE.md 작성 (API 문서) - 완료
+[11-8] ARCHITECTURE.md 작성 (아키텍처) - 선택사항, 미실행
+[11-9] DEVELOPMENT.md 작성 (개발 가이드) - 선택사항, 미실행
+[11-10] ✅ README.md 업데이트 - 완료
+
+우선순위:
+--------
+High: [11-2, 11-3, 11-4, 11-5] - 모두 완료 ✅
+Medium: [11-6, 11-7, 11-10] - 모두 완료 ✅
+Low: [11-8, 11-9] - 선택사항, 현재 미실행
+
+Phase 11 완료 요약:
+-----------------
+✅ 사용자 문서 (USER_GUIDE.md, AT_COMMANDS.md, CONFIGURATION.md, TROUBLESHOOTING.md, EXAMPLES.md)
+✅ 개발자 문서 (API_REFERENCE.md)
+✅ README.md 업데이트 (새 문서에 대한 링크 추가)
+⏸️  선택사항 문서 (ARCHITECTURE.md, DEVELOPMENT.md) - 필요시 추후 작성
+
+작성된 문서 내용:
+--------------
+- USER_GUIDE.md: 설치, 설정, 사용법, 터미널 연결, AT 명령어, 일반 시나리오, 팁
+- AT_COMMANDS.md: 모든 AT 명령어 (기본, 확장, S-레지스터), 결과 코드, 명령 체이닝, 예제
+- CONFIGURATION.md: 전체 설정 매개변수, 일반 설정, 고급 설정, 성능 조정
+- TROUBLESHOOTING.md: 일반 문제, 오류 메시지, 디버깅 기술, FAQ
+- EXAMPLES.md: 20+ 실제 사용 예제 (BBS 클라이언트, BBS 호스트, 테스팅, 통합)
+- API_REFERENCE.md: 모든 API 모듈 문서화 (serial, modem, telnet, bridge, config, common)
+
+
+================================================================================
+Phase 18: Level 1 개발 (Timestamp 전송 및 기본 동작)
+================================================================================
+
+목표:
+-----
+Level 1 구현: 연결 후 주기적으로 timestamp를 전송하는 기본 기능 구현
+- 최초 20초 후 첫 번째 timestamp 전송 (1초마다 카운트다운 출력)
+- 이후 10초마다 timestamp 전송
+- 형식: "\r\n[YYYY-MM-DD HH:MM:SS] Level 1 Active\r\n"
+
+작업 내역:
+---------
+
+[18-1] ✅ Baudrate 조정 로직 확인
+위치: src/modem.c:968-1001
+상태: 이미 구현되어 있음 (modem_sample 패턴)
+- CONNECT 메시지에서 속도 파싱 (예: "CONNECT 1200/ARQ" → 1200)
+- modem_baudrate_to_speed_t() 변환
+- serial_set_baudrate() 호출
+- 문제: stdout 출력 누락 → printf() 추가하여 가시성 향상
+결과: 정상 작동 확인 (로그에서 "Serial port speed adjusted successfully" 확인됨)
+
+[18-2] ✅ 진단 코드 추가 - Draining Loop 분석
+위치: src/bridge.c:800-845
+목적: 프로그램이 "Hardware message processed during drain phase" 이후 멈추는 원인 파악
+추가 내용:
+- 각 draining iteration 시작/종료 로그
+- serial_read() 호출 전후 로그
+- modem state 확인 로그
+- drain_attempts 증가 추적
+- sleep 전후 상태 로그
+발견: Iteration 6에서 serial_read() 호출 후 프로그램 멈춤
+
+[18-3] ✅ serial_read() 블로킹 문제 수정
+위치: src/serial.c:298-381
+문제: serial_read()가 blocking mode에서 read() 직접 호출 → 데이터 없으면 무한 대기
+원인:
+- Serial port: VMIN=1, VTIME=0 (blocking mode)
+- serial_read()가 read() 직접 호출
+- Draining loop iteration 6에서 더 이상 데이터 없음 → read() 영원히 대기
+
+해결책 (modem_sample 패턴):
+- select() with 100ms timeout 추가
+- read() 호출 전에 select()로 데이터 가용성 확인
+- Timeout 시 0 반환 (데이터 없음)
+- Exception handling 추가 (exceptfds)
+
+구현 내용:
+```c
+// select() with timeout
+FD_ZERO(&readfds);
+FD_ZERO(&exceptfds);
+FD_SET(port->fd, &readfds);
+FD_SET(port->fd, &exceptfds);
+
+tv.tv_sec = 0;
+tv.tv_usec = 100000;  /* 100ms */
+
+sel = select(port->fd + 1, &readfds, NULL, &exceptfds, &tv);
+
+if (sel == 0) {
+    return 0;  // Timeout - no data
+}
+
+// Only read if data ready
+if (FD_ISSET(port->fd, &readfds)) {
+    n = read(port->fd, buffer, size);
+}
+```
+
+결과:
+- Draining loop가 정상 종료 가능 (drained=0 반환)
+- 100ms timeout으로 responsive한 draining
+- modem_sample 패턴 완전 호환
+
+빌드: ✅ 성공 (2025-10-16)
+
+[18-4] ⏳ Draining Loop 완료 확인 (테스트 필요)
+예상 동작:
+1. Draining iteration 6: serial_read() 호출
+2. select() timeout (100ms) → drained=0 반환
+3. "Draining loop iteration 6: drained=0 bytes"
+4. while 조건 확인 (drained=0) → 루프 종료
+5. "===== DRAINING LOOP EXITED ====="
+6. "Buffer drain complete (6 attempts)"
+
+[18-5] ⏳ Thread 생성 확인 (테스트 필요)
+예상 동작:
+1. "=== MODEM CONFIGURATION SUMMARY ==="
+2. "Creating Serial/Modem thread (Level 1)..."
+3. "Level 1 thread created successfully"
+4. "[Thread 1] Serial/Modem thread started"
+
+[18-6] ⏳ Health Check ONLINE 감지 (테스트 필요)
+위치: src/bridge.c:736-751
+예상 동작:
+1. "[Thread 1] === Performing serial health check ==="
+2. "[Thread 1] Modem is ALREADY ONLINE (CONNECT received during init)"
+3. "[Thread 1] Enabling timestamp transmission immediately"
+4. client_data_received = true 설정
+5. connection_start_time 초기화
+6. "[Thread 1] === Health check completed ==="
+
+[18-7] ⏳ Timestamp 전송 확인 (테스트 필요)
+위치: src/bridge.c:766-902
+예상 동작:
+
+첫 번째 timestamp (20초 대기):
+```
+[INFO] [Thread 1] Modem ONLINE detected, waiting 20 seconds before first timestamp
+[DEBUG] [Thread 1] First timestamp countdown: 20 seconds remaining (client_data_received=1)
+[DEBUG] [Thread 1] First timestamp countdown: 19 seconds remaining (client_data_received=1)
+...
+[DEBUG] [Thread 1] First timestamp countdown: 1 seconds remaining (client_data_received=1)
+[INFO] [Thread 1] Timestamp conditions met: now=X, connect_time=Y, last_sent=Y
+[INFO] [Thread 1] Time since connect: 20 sec, Time since last: 20 sec
+[INFO] [Thread 1] Sending timestamp: \r\n[2025-10-16 12:34:56] Level 1 Active\r\n
+[INFO] [Thread 1] Timestamp HEX (45 bytes): 0D 0A 5B ...
+[DEBUG] [Thread 1] Calling serial_write() with 45 bytes
+[DEBUG] [Thread 1] serial_write() returned: 45
+[INFO] [Thread 1] Timestamp sent successfully: 45 bytes
+```
+
+이후 timestamp (10초마다):
+```
+[DEBUG] [Thread 1] Next timestamp countdown: 10 seconds remaining
+[DEBUG] [Thread 1] Next timestamp countdown: 9 seconds remaining
+...
+[DEBUG] [Thread 1] Next timestamp countdown: 1 seconds remaining
+[INFO] [Thread 1] Sending timestamp: \r\n[2025-10-16 12:35:06] Level 1 Active\r\n
+[INFO] [Thread 1] Timestamp sent successfully: 45 bytes
+```
+
+현재 상태:
+---------
+✅ Baudrate 조정: 완료 및 테스트 성공
+✅ Draining loop 진단: 완료 (문제 위치 특정)
+✅ serial_read() 수정: 완료 (select() with timeout)
+✅ 빌드: 성공
+⏳ 통합 테스트: 대기 중
+
+다음 단계:
+---------
+1. 실제 하드웨어로 테스트 실행
+2. 로그 확인:
+   - Draining loop 정상 종료 확인
+   - Thread 생성 확인
+   - Health check ONLINE 감지 확인
+   - Timestamp 전송 확인 (20초 후 첫 전송, 이후 10초마다)
+3. 문제 발생 시 로그 분석 및 추가 수정
+
+참고 문서:
+---------
+- DRAINING_LOOP_DIAGNOSTIC.md (진단 분석)
+- TIMESTAMP_TRANSMISSION_FIX.md (timestamp 구현 분석)
+- BAUDRATE_ADJUSTMENT_ANALYSIS.md (baudrate 조정 분석)
+- SERIAL_READ_BLOCKING_FIX.md (최종 수정 내역)
+
+주요 파일:
+---------
+- src/bridge.c:800-845 - Draining loop (진단 코드 포함)
+- src/bridge.c:736-751 - Health check ONLINE detection
+- src/bridge.c:766-902 - Timestamp transmission loop
+- src/serial.c:298-381 - serial_read() with select() timeout
+- src/modem.c:968-1001 - Baudrate adjustment

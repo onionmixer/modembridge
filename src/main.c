@@ -153,27 +153,24 @@ int main(int argc, char *argv[])
     config_print(&config);
 
     /* === Health Check (one-time, at startup) === */
+    /* TEMPORARILY DISABLED - Health check may pollute serial buffers */
     printf("\n");
-    health_report_t health;
-    if (healthcheck_run(&config, &health) == SUCCESS) {
-        healthcheck_print_report(&health);
-    } else {
-        printf("=== Health Check ===\n");
-        printf("Health check failed to run\n");
-        printf("====================\n");
-    }
-    printf("\n");
-
-    /* Health check results are informational only - server will start regardless */
-    MB_LOG_INFO("Starting server (health check completed)...");
+    printf("[INFO] Health check DISABLED for testing\n");
+    printf("[INFO] Starting server without health check...\n");
+    fflush(stdout);
+    MB_LOG_INFO("Starting server (health check DISABLED)...");
     /* === Health Check End === */
 
     /* Setup signal handlers */
+    printf("[DEBUG] Setting up signal handlers...\n");
+    fflush(stdout);
     if (setup_signals() != SUCCESS) {
         MB_LOG_ERROR("Failed to setup signal handlers");
         ret = ERROR_GENERAL;
         goto cleanup;
     }
+    printf("[DEBUG] Signal handlers setup complete\n");
+    fflush(stdout);
 
     /* Daemonize if requested */
     if (daemon_mode) {
@@ -192,14 +189,22 @@ int main(int argc, char *argv[])
     }
 
     /* Initialize and run bridge */
+    printf("[DEBUG] Initializing bridge context...\n");
+    fflush(stdout);
     bridge_ctx_t bridge;
     bridge_init(&bridge, &config);
+    printf("[DEBUG] Bridge context initialized\n");
+    fflush(stdout);
 
+    printf("[DEBUG] Starting bridge...\n");
+    fflush(stdout);
     if (bridge_start(&bridge) != SUCCESS) {
         MB_LOG_ERROR("Failed to start bridge");
         ret = ERROR_GENERAL;
         goto cleanup_bridge;
     }
+    printf("[DEBUG] Bridge started successfully\n");
+    fflush(stdout);
 
     /* Main loop */
     while (g_running) {

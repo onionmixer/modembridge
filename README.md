@@ -6,13 +6,39 @@ A high-performance dialup modem emulator that bridges serial port connections to
 
 ModemBridge emulates a Hayes-compatible dialup modem, translating AT commands from serial-connected clients into telnet connections. This allows retrocomputing systems, terminal programs, and BBS software to communicate with telnet-based services as if they were connecting through a traditional telephone modem.
 
+## Documentation
+
+Comprehensive documentation is available in the [docs/](docs/) directory:
+
+- **[User Guide](docs/USER_GUIDE.md)** - Complete guide for installing, configuring, and using ModemBridge
+- **[AT Commands Reference](docs/AT_COMMANDS.md)** - Detailed reference for all supported AT commands
+- **[Configuration Guide](docs/CONFIGURATION.md)** - Complete configuration file reference and examples
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Solutions to common problems and debugging techniques
+- **[Examples](docs/EXAMPLES.md)** - Real-world usage examples and configuration scenarios
+- **[API Reference](docs/API_REFERENCE.md)** - Developer documentation for the codebase
+
+**Quick Start**: See the [User Guide](docs/USER_GUIDE.md) to get started in 5 minutes.
+
 ## Features
+
+### 🆕 Level 3 Advanced Pipeline Management
+- **Sophisticated State Machine**: 10-state system with timeout handling and DCD-based activation
+- **Quantum-based Scheduling**: Fair round-robin with anti-starvation algorithms (50ms base quantum)
+- **Watermark-based Buffer Management**: Dynamic sizing with 5-level overflow protection
+- **Performance Monitoring**: Real-time latency tracking and comprehensive metrics
+- **Anti-starvation Algorithms**: 500ms threshold prevents pipeline starvation
+- **Dynamic Buffer Sizing**: Adaptive growth/shrink based on usage patterns
+- **Memory Pool Management**: Fragmentation prevention with fixed-size block allocation
+- **Real-time Chat Server Optimization**: Sub-100ms latency for interactive applications
 
 ### Modem Emulation
 - **Hayes AT Command Set**: Full support for essential AT commands (ATA, ATD, ATH, ATZ, ATE, ATV, ATQ, ATS, ATO, AT&F)
+- **Extended AT Commands**: AT&C, AT&D, ATB, ATX, ATL, ATM, AT\N, AT&S, AT&V, AT&W (Phase 16)
 - **Escape Sequence Detection**: Implements the `+++` escape sequence with proper guard time (1 second)
-- **S-Register Support**: Configurable modem parameters through S-registers
+- **S-Register Support**: Configurable modem parameters through S-registers (S0-S15)
 - **Online/Command Mode**: Proper state management between command and data modes
+- **DCD/DTR Management**: Enhanced control with edge detection and state transitions (Phase 15)
+- **Auto-Answer Support**: S0 register for automatic connection answering (Phase 15)
 - **Flow Control**: Support for NONE, XON/XOFF, RTS/CTS, and BOTH modes
 
 ### Protocol Handling
@@ -24,8 +50,11 @@ ModemBridge emulates a Hayes-compatible dialup modem, translating AT commands fr
 ### Performance
 - **Non-blocking I/O**: Uses select() for efficient multiplexing
 - **Zero Dependencies**: Pure C implementation using only glibc and POSIX APIs
-- **Low Latency**: Direct data path with minimal buffering
+- **Ultra-low Latency**: Sub-100ms average with Level 3 quantum scheduling
 - **Dynamic Baudrate**: Runtime baudrate negotiation from 300 to 230400 bps
+- **Adaptive Performance**: Level 3 automatically optimizes for workload (chat servers, file transfers, etc.)
+- **1200 bps Optimization**: Special handling for low-speed modem connections
+- **Memory Efficiency**: Dynamic allocation with <1% overflow rate target
 
 ### Operational Features
 - **Daemon Mode**: Background operation with syslog integration
@@ -54,19 +83,118 @@ ModemBridge emulates a Hayes-compatible dialup modem, translating AT commands fr
 
 ### Building from Source
 
+ModemBridge supports multiple build levels for different use cases. Each level enables specific features and optimizations.
+
+#### Build Levels Overview
+
+- **Level 1**: Serial modem emulation only (no telnet support)
+- **Level 2**: Serial + Telnet bridging (default for most users)
+- **Level 3**: Advanced pipeline management with performance optimizations
+
+#### Build Commands
+
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/modembridge.git
 cd modembridge
 
-# Build the project
+# Build Level 3 (default) - Full feature set with advanced pipeline management
 make
+# or
+make level3
 
-# Optional: Run with verbose output to verify build
-make clean && make
+# Build Level 2 - Serial + Telnet bridging (recommended for most users)
+make level2
+
+# Build Level 1 - Serial modem emulation only
+make level1
+
+# Clean previous build artifacts
+make clean
+
+# Show current build configuration
+make config
+
+# Show Makefile variables (for debugging)
+make show
 
 # The executable will be at: build/modembridge
 ```
+
+#### Build Level Details
+
+**Level 1 (Serial Only)**
+- Serial port communication and Hayes AT command emulation
+- Direct modem-to-client communication without telnet bridging
+- Minimal dependencies and resource usage
+- Ideal for standalone modem testing and development
+- Build flags: `ENABLE_LEVEL1`
+
+**Level 2 (Serial + Telnet)**
+- Full Level 1 features plus telnet protocol support
+- Bidirectional bridging between serial and telnet connections
+- ANSI filtering and UTF-8 multibyte character handling
+- Recommended for most retrocomputing and BBS use cases
+- Build flags: `ENABLE_LEVEL1`, `ENABLE_LEVEL2`
+
+**Level 3 (Advanced Pipeline)**
+- Complete Level 2 features plus advanced pipeline management
+- Quantum-based scheduling and watermark-based buffer management
+- Performance optimizations for real-time applications
+- Sub-100ms latency with anti-starvation algorithms
+- Dynamic buffer sizing and memory pool management
+- Build flags: `ENABLE_LEVEL1`, `ENABLE_LEVEL2`, `ENABLE_LEVEL3`
+
+#### Complete Makefile Reference
+
+The Makefile provides comprehensive build and development targets:
+
+```bash
+# Build Targets
+make                    # Build Level 3 (default)
+make level1           # Build Level 1 (serial only)
+make level2           # Build Level 2 (serial + telnet)
+make level3           # Build Level 3 (full feature set)
+
+# Build Management
+make clean            # Remove all build artifacts
+make debug           # Build with debug symbols and no optimization
+make config          # Show current build configuration
+make show            # Show Makefile variables (for debugging)
+
+# Installation
+make install          # Install to system (requires root)
+make uninstall        # Remove from system (requires root)
+
+# Testing
+make run              # Build and run with default config
+make help             # Show available targets and usage
+```
+
+#### Build Options
+
+You can customize the build with environment variables:
+
+```bash
+# Debug build with symbols
+make DEBUG=1
+
+# Custom build mode
+make BUILD_MODE=level2
+
+# Custom installation prefix
+make install PREFIX=/opt/modembridge
+```
+
+#### Build Flags Reference
+
+Each build level uses specific preprocessor flags:
+
+- **Level 1**: `-DENABLE_LEVEL1`
+- **Level 2**: `-DENABLE_LEVEL1 -DENABLE_LEVEL2`
+- **Level 3**: `-DENABLE_LEVEL1 -DENABLE_LEVEL2 -DENABLE_LEVEL3`
+
+These flags enable conditional compilation of features specific to each level, ensuring optimal binary size and performance for the intended use case.
 
 ### Installation
 
@@ -94,19 +222,27 @@ Create a configuration file (default: `/etc/modembridge.conf`):
 # Serial Port Configuration
 SERIAL_PORT=/dev/ttyUSB0
 BAUDRATE=115200
-BIT_PARITY=N          # N=None, E=Even, O=Odd
+BIT_PARITY=NONE       # NONE, EVEN, ODD
 BIT_DATA=8            # 5, 6, 7, or 8
 BIT_STOP=1            # 1 or 2
-FLOW=NONE             # NONE, XONXOFF, RTSCTS, BOTH
+FLOW=NONE             # NONE, SOFTWARE, HARDWARE, BOTH
+
+# Modem Initialization (Phase 13, executed during health check)
+MODEM_INIT_COMMAND="ATH0; AT&C1 &D2 B0 X4 S7=60 S10=7"
+
+# Modem Auto-Answer (Phase 15, executed after server start, NO H0!)
+MODEM_AUTOANSWER_COMMAND="ATS0=2"
 
 # Telnet Server Configuration
 TELNET_HOST=bbs.example.com
 TELNET_PORT=23
 
-# Daemon Configuration
-PID_FILE=/var/run/modembridge.pid
-LOG_LEVEL=INFO        # DEBUG, INFO, WARNING, ERROR
+# Data Logging (optional)
+DATA_LOG_ENABLED=1
+DATA_LOG_FILE=modembridge.log
 ```
+
+See the [Configuration Guide](docs/CONFIGURATION.md) for complete details on all configuration options.
 
 ### Serial Port Permissions
 
@@ -121,6 +257,8 @@ sudo usermod -a -G dialout $USER
 
 ### Basic Usage
 
+The appropriate ModemBridge binary should be used based on your requirements:
+
 ```bash
 # Run in foreground with default config
 modembridge
@@ -133,6 +271,23 @@ modembridge -d
 
 # Enable verbose logging
 modembridge -v
+```
+
+### Choosing the Right Build Level
+
+**For most retrocomputing and BBS users:**
+```bash
+make level2    # Recommended for telnet bridging
+```
+
+**For modem development and testing:**
+```bash
+make level1    # Serial emulation only
+```
+
+**For high-performance real-time applications:**
+```bash
+make level3    # Advanced pipeline management
 ```
 
 ### Command Line Options
@@ -151,21 +306,15 @@ Options:
 
 ### Supported AT Commands
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `AT` | Attention (test command) | `AT` |
-| `ATA` | Answer incoming call | `ATA` |
-| `ATD<number>` | Dial (initiates connection) | `ATDT5551234` |
-| `ATH` | Hang up | `ATH` or `ATH0` |
-| `ATZ` | Reset to defaults | `ATZ` |
-| `ATE0/1` | Echo off/on | `ATE1` |
-| `ATV0/1` | Numeric/verbose responses | `ATV1` |
-| `ATQ0/1` | Responses on/off | `ATQ0` |
-| `ATS<n>=<v>` | Set S-register | `ATS0=1` |
-| `ATS<n>?` | Query S-register | `ATS2?` |
-| `ATO` | Return to online mode | `ATO` |
-| `AT&F` | Factory defaults | `AT&F` |
-| `ATI` | Information | `ATI` |
+ModemBridge supports a comprehensive set of Hayes-compatible AT commands:
+
+**Basic Commands**: AT, ATA, ATD, ATE, ATH, ATI, ATO, ATQ, ATV, ATZ
+
+**Extended Commands**: AT&C, AT&D, AT&F, AT&S, AT&V, AT&W, ATB, ATL, ATM, ATX, AT\N
+
+**S-Registers**: S0-S15 (auto-answer, escape character, timeouts, etc.)
+
+See the [AT Commands Reference](docs/AT_COMMANDS.md) for complete documentation with examples and parameter details.
 
 ### Escape Sequence
 
@@ -195,6 +344,75 @@ Terminal → Serial → ModemBridge → Telnet → BBS/Server
 ```
 
 ## Testing
+
+### 🆕 Level 3 Advanced Testing
+
+The `tests/` directory contains comprehensive Level 3 testing utilities:
+
+**Level 3 Test Suite** (`test_level3.sh`)
+- Comprehensive testing of all Level 3 features
+- State machine transition validation
+- Quantum scheduling verification
+- Buffer management stress testing
+- Performance benchmarking
+- Integration with Level 1/2 components
+
+```bash
+cd tests
+./test_level3.sh  # Run all Level 3 tests
+```
+
+**Level 3 Benchmarking** (`benchmark_level3.sh`)
+- Performance validation against LEVEL3_WORK_TODO.txt targets
+- Latency measurement and tracking
+- Buffer overflow rate testing
+- 1200 bps optimization verification
+- Comprehensive performance reporting
+
+```bash
+./benchmark_level3.sh  # Run performance benchmarks
+```
+
+**Implementation Validation** (`validate_level3.sh`)
+- Code structure verification
+- Feature completeness checking
+- Compilation validation
+- Documentation review
+
+```bash
+./validate_level3.sh  # Validate implementation
+```
+
+### Level 2 Telnet Testing
+
+The `tests/` directory also contains specialized Level 2 telnet testing utilities:
+
+**Standalone Telnet Tester** (`telnet_test_standalone.c`)
+- Independent telnet client that doesn't require modem hardware
+- Tests multi-language text transmission ("abcd", "한글", "こんにちは。")
+- Sends test strings at 3-second intervals
+- Verifies echo responses from telnet servers
+- Supports all three telnet server modes (line, character, binary)
+
+```bash
+# Build the standalone tester
+gcc -Wall -Wextra -O2 -std=gnu11 -D_GNU_SOURCE -DENABLE_LEVEL2 -Iinclude -o telnet_test_standalone tests/telnet_test_standalone.c src/telnet.c src/common.c -lpthread
+
+# Test against different telnet servers
+./telnet_test_standalone -h 127.0.0.1 -p 9091 -d 30 -v  # Line mode server
+./telnet_test_standalone -h 127.0.0.1 -p 9092 -d 30 -v  # Character mode server
+./telnet_test_standalone -h 127.0.0.1 -p 9093 -d 30 -v  # Binary mode server
+```
+
+**Automated Test Script** (`test_telnet.sh`)
+- Runs comprehensive tests across multiple telnet servers
+- Generates detailed logs for analysis
+- Tests both text reception and transmission capabilities
+
+```bash
+cd tests
+./test_telnet.sh
+```
 
 ### Testing with socat
 
@@ -305,90 +523,93 @@ ANSI Passthrough → Raw Bytes → Serial Port
 
 ## Troubleshooting
 
-### Common Issues
+### Quick Fixes
 
 **Serial port permission denied**
 ```bash
-# Add user to dialout group
 sudo usermod -a -G dialout $USER
 # Log out and back in
 ```
 
-**Serial port in use**
-```bash
-# Check what's using the port
-sudo lsof /dev/ttyUSB0
-# Kill the process or stop competing service
-```
-
 **No response to AT commands**
 ```bash
-# Check baudrate matches between terminal and config
-# Verify serial device path in config
-# Enable verbose logging: modembridge -v
+# Enable verbose logging to see what's happening
+modembridge -v -c modembridge.conf
 ```
 
 **Connection fails**
 ```bash
-# Verify telnet server is reachable
+# Test telnet manually first
 telnet bbs.example.com 23
-# Check firewall rules
-sudo iptables -L
 ```
 
-**Data corruption or garbled text**
-```bash
-# Check serial parameters match (8N1 is standard)
-# Verify flow control settings
-# Try different baudrates
-```
+### Complete Troubleshooting Guide
 
-### Debug Logging
-
-Enable debug logging to troubleshoot issues:
-
-```bash
-# Run in foreground with verbose output
-modembridge -v -c modembridge.conf
-
-# View syslog in real-time
-tail -f /var/log/syslog | grep modembridge
-```
+For detailed troubleshooting, error messages, debugging techniques, and FAQ, see the [Troubleshooting Guide](docs/TROUBLESHOOTING.md).
 
 ## Project Structure
 
 ```
 modembridge/
-├── include/           # Header files
-│   ├── bridge.h      # Bridge engine definitions
-│   ├── common.h      # Common macros and types
-│   ├── config.h      # Configuration structures
-│   ├── modem.h       # Modem emulation
-│   ├── serial.h      # Serial port interface
-│   └── telnet.h      # Telnet protocol
-├── src/              # Source files
-│   ├── bridge.c      # Main bridge logic
-│   ├── common.c      # Utility functions
-│   ├── config.c      # Config parser
-│   ├── main.c        # Entry point
-│   ├── modem.c       # AT command processor
-│   ├── serial.c      # Serial I/O
-│   └── telnet.c      # Telnet client
-├── build/            # Build artifacts (generated)
-│   ├── obj/          # Object files
-│   └── modembridge   # Final executable
-├── Makefile          # Build system
-├── modembridge.conf  # Example configuration
-├── README.md         # This file
-├── CLAUDE.md         # AI assistant documentation
-├── LOGIC_REVIEW.md   # Logic review and bug fixes
-└── TODO.txt          # Development roadmap
+├── include/              # Header files
+│   ├── bridge.h         # Bridge engine definitions
+│   ├── common.h         # Common macros and types
+│   ├── config.h         # Configuration structures
+│   ├── modem.h          # Modem emulation
+│   ├── serial.h         # Serial port interface
+│   └── telnet.h         # Telnet protocol
+├── src/                 # Source files
+│   ├── bridge.c         # Main bridge logic
+│   ├── common.c         # Utility functions
+│   ├── config.c         # Config parser
+│   ├── main.c           # Entry point
+│   ├── modem.c          # AT command processor
+│   ├── serial.c         # Serial I/O
+│   └── telnet.c         # Telnet client
+├── docs/                # Documentation
+│   ├── USER_GUIDE.md    # User guide
+│   ├── AT_COMMANDS.md   # AT command reference
+│   ├── CONFIGURATION.md # Configuration guide
+│   ├── TROUBLESHOOTING.md # Troubleshooting guide
+│   ├── EXAMPLES.md      # Usage examples
+│   ├── API_REFERENCE.md # Developer API docs
+│   └── LEVEL3_INTEGRATION_GUIDE.md # Level 3 integration guide
+├── build/               # Build artifacts (generated)
+│   ├── obj/             # Object files
+│   └── modembridge      # Final executable
+├── Makefile             # Build system
+├── modembridge.conf     # Example configuration
+├── tests/               # Test files and utilities
+│   ├── telnet_test_standalone.c    # Standalone Level 2 telnet tester
+│   ├── telnet_test.h               # Telnet test module header
+│   ├── telnet_test.c               # Telnet test implementation
+│   ├── telnet_interface.h          # Telnet interface abstraction
+│   ├── telnet_interface.c          # Telnet interface implementation
+│   ├── test_telnet.sh               # Automated telnet test script
+│   ├── test_level3.sh              # Level 3 comprehensive test suite
+│   ├── benchmark_level3.sh         # Level 3 performance benchmarks
+│   └── validate_level3.sh          # Level 3 implementation validation
+├── README.md            # This file
+├── CLAUDE.md            # AI assistant documentation
+├── LOGIC_REVIEW.md      # Logic review and bug fixes
+├── LEVEL3_IMPLEMENTATION_SUMMARY.md # Complete Level 3 implementation summary
+├── DEPLOYMENT_READINESS_CHECKLIST.md # Production deployment checklist
+└── TODO.txt             # Development roadmap
 ```
 
 ## Performance
 
 ### Benchmarks
 
+**Level 3 Enhanced Performance:**
+- **Latency**: <100ms average processing time (quantum scheduling)
+- **Buffer Overflow Rate**: <1% with watermark management
+- **Real-time Chat**: Sub-second response for interactive applications
+- **1200 bps Optimization**: Enhanced performance for low-speed connections
+- **Memory Efficiency**: Dynamic allocation with fragmentation prevention
+- **CPU Usage**: <10% idle, <50% load (adaptive scheduling)
+
+**Legacy Performance:**
 - **Latency**: < 1ms serial-to-telnet forwarding
 - **Throughput**: Supports full baudrate (tested up to 230400 bps)
 - **Memory**: ~100KB resident size

@@ -28,6 +28,7 @@ typedef struct {
 /* Complete health check report */
 typedef struct {
     health_check_result_t serial_port;
+    health_check_result_t serial_init;
     health_check_result_t modem_device;
     health_check_result_t telnet_server;
 } health_report_t;
@@ -51,6 +52,16 @@ int healthcheck_run(const config_t *cfg, health_report_t *report);
 int healthcheck_serial_port(const char *device, health_check_result_t *result);
 
 /**
+ * Initialize serial port with configuration settings
+ * @param device Serial device path
+ * @param cfg Configuration (for baudrate, parity, flow control, etc.)
+ * @param result Output result structure
+ * @return SUCCESS if check completed, error code otherwise
+ */
+int healthcheck_serial_init(const char *device, const config_t *cfg,
+                            health_check_result_t *result);
+
+/**
  * Check modem device responsiveness (optional, with timeout)
  * @param device Serial device path
  * @param cfg Configuration (for baudrate, etc.)
@@ -71,10 +82,11 @@ int healthcheck_telnet_server(const char *host, int port,
                               health_check_result_t *result);
 
 /**
- * Print health check report to stdout
+ * Print health check report to stdout with MODEM_COMMAND execution
  * @param report Health check report
+ * @param cfg Configuration (for MODEM_COMMAND execution, can be NULL)
  */
-void healthcheck_print_report(const health_report_t *report);
+void healthcheck_print_report(const health_report_t *report, const config_t *cfg);
 
 /**
  * Convert health status to string

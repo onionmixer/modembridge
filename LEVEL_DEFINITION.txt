@@ -1,0 +1,76 @@
+# ModemBridge 개발 구간 정의
+
+ModemBridge는 멀티스레드 모델로 구현되며, 개발은 다음 세 구간으로 나누어 진행됩니다.
+
+## Level 1: Client -> Modem -> 서버 Thread1
+
+클라이언트에서 serial port를 통해 데이터를 받아서 연결 및 데이터를 관리하는 구간입니다.
+
+**주요 기능:**
+- Serial port를 통한 데이터 수신
+- AT 명령어 처리 (명령 모드)
+- 모뎀 상태 관리
+- 수신된 데이터를 서버 Thread1로 전달
+
+**관련 모듈:**
+- serial.c: Serial port 하드웨어 추상화
+- modem.c: AT 명령어 처리 및 모뎀 에뮬레이션
+- bridge.c: 데이터 라우팅
+
+## Level 2: 서버 Thread2 -> Telnet Server
+
+서버에서 telnet 서버로 연결한 뒤 데이터를 받아서 연결 및 데이터를 관리하는 구간입니다.
+
+**주요 기능:**
+- Telnet 서버 연결 설정
+- Telnet 프로토콜 처리 (IAC sequences)
+- Telnet 서버로부터 데이터 수신
+- 수신된 데이터를 서버 Thread2에서 관리
+
+**관련 모듈:**
+- telnet.c: Telnet RFC 854 프로토콜 구현
+- bridge.c: Telnet 연결 관리
+
+## Level 3: 서버 Thread1 <-> 서버 Thread2
+
+Level1에서 관리되는 데이터와 Level2에서 관리되는 데이터를 흐름에 따라 데이터 동기 처리를 하는 구간입니다.
+
+**주요 기능:**
+- Thread 간 데이터 동기화
+- Serial → Telnet 데이터 흐름 제어
+- Telnet → Serial 데이터 흐름 제어
+- ANSI 시퀀스 필터링 및 변환
+- 버퍼 관리 및 멀티바이트 문자 경계 처리
+
+**관련 모듈:**
+- bridge.c: I/O 멀티플렉싱 및 데이터 라우팅
+- Thread 동기화 메커니즘 (mutex, condition variables)
+
+## 개발 순서
+
+각 레벨은 순차적으로 개발되며, 하위 레벨이 안정화된 후 상위 레벨로 진행합니다:
+
+1. Level 1 완성 및 테스트
+2. Level 2 완성 및 테스트
+3. Level 3 통합 및 데이터 동기화 구현
+4. 전체 시스템 통합 테스트
+
+## 멀티스레드 아키텍처
+
+현재 코드는 이 구간 정의를 위해 멀티스레드 모델로 개선되어 있습니다.
+
+**Thread 구조:**
+- Main Thread: 신호 처리, 데몬 관리
+- Serial Thread (Level 1): Serial port I/O 처리
+- Telnet Thread (Level 2): Telnet 서버 I/O 처리
+- Bridge Thread (Level 3): 데이터 동기화 및 라우팅
+
+## Thread 간 데이터 교환 규칙
+
+**중요:** Level 1과 Level 2는 직접적으로 데이터를 주고받지 않습니다. 두 Level의 Thread 간 데이터 관리는 전적으로 Level 3에서 담당합니다.
+
+**데이터 흐름:**
+- Level 1 (Serial Thread) → Level 3 (Bridge Thread) → Level 2 (Telnet Thread)
+- Level 2 (Telnet Thread) → Level 3 (Bridge Thread) → Level 1 (Serial Thread)
+
+Level 3는 thread-safe 버퍼와 동기화 메커니즘을 사용하여 Level 1과 Level 2 간의 데이터를 안전하게 중계합니다.

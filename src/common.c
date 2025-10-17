@@ -199,3 +199,103 @@ int remove_pid_file(const char *pid_file)
 
     return SUCCESS;
 }
+
+/**
+ * Convert error code to human-readable string
+ */
+const char* error_to_string(int error_code)
+{
+    switch (error_code) {
+        case SUCCESS:
+            return "Success";
+        case ERROR_GENERAL:
+            return "General error";
+        case ERROR_INVALID_ARG:
+            return "Invalid argument";
+        case ERROR_IO:
+            return "I/O error";
+        case ERROR_TIMEOUT:
+            return "Operation timed out";
+        case ERROR_CONNECTION:
+            return "Connection error";
+        case ERROR_CONFIG:
+            return "Configuration error";
+        case ERROR_HANGUP:
+            return "Carrier lost / connection hangup";
+        case ERROR_MODEM:
+            return "Modem command error";
+        case ERROR_NO_CARRIER:
+            return "No carrier detected";
+        case ERROR_BUSY:
+            return "Line busy";
+        case ERROR_NO_DIALTONE:
+            return "No dial tone";
+        case ERROR_NO_ANSWER:
+            return "No answer";
+        case ERROR_PARTIAL:
+            return "Partial operation";
+        case ERROR_SERIAL:
+            return "Serial port error";
+        case ERROR_TELNET:
+            return "Telnet protocol error";
+        case ERROR_BUFFER_FULL:
+            return "Buffer full";
+        case ERROR_PROTOCOL:
+            return "Protocol negotiation error";
+        case ERROR_SYSTEM:
+            return "System call error";
+        case ERROR_THREAD:
+            return "Thread management error";
+        default:
+            return "Unknown error";
+    }
+}
+
+/**
+ * Log data transmission for debugging (modem_sample pattern)
+ */
+void log_transmission(const char *tag, const char *data, int len)
+{
+#ifdef DEBUG
+    char hex_buf[1024];
+    int i, pos = 0;
+
+    /* Generate hex dump */
+    for (i = 0; i < len && pos < sizeof(hex_buf) - 4; i++) {
+        pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos,
+                       "%02X ", (unsigned char)data[i]);
+    }
+
+    MB_LOG_DEBUG("[%s] TX %d bytes: %s", tag, len, hex_buf);
+
+    /* Check if data is printable ASCII */
+    int printable = 1;
+    for (i = 0; i < len; i++) {
+        if (!isprint(data[i]) && data[i] != '\r' && data[i] != '\n' && data[i] != '\t') {
+            printable = 0;
+            break;
+        }
+    }
+
+    /* Log ASCII representation if printable */
+    if (printable) {
+        char ascii_buf[256];
+        int copy_len = (len < sizeof(ascii_buf) - 1) ? len : sizeof(ascii_buf) - 1;
+        memcpy(ascii_buf, data, copy_len);
+        ascii_buf[copy_len] = '\0';
+
+        /* Replace control characters for display */
+        for (i = 0; i < copy_len; i++) {
+            if (ascii_buf[i] == '\r') ascii_buf[i] = '\\';
+            if (ascii_buf[i] == '\n') ascii_buf[i] = 'n';
+            if (ascii_buf[i] == '\t') ascii_buf[i] = 't';
+        }
+
+        MB_LOG_DEBUG("[%s] ASCII: %s", tag, ascii_buf);
+    }
+#else
+    (void)tag;
+    (void)data;
+    (void)len;
+#endif
+}

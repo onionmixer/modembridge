@@ -35,12 +35,16 @@
 #define SMALL_BUFFER_SIZE   256
 #define LINE_BUFFER_SIZE    1024
 
+/* Transmission chunk settings (modem_sample pattern) */
+#define TX_CHUNK_SIZE       256     /* Max bytes per chunk */
+#define TX_CHUNK_DELAY_US   10000   /* 10ms delay between chunks */
+
 /* Configuration */
 #define DEFAULT_CONFIG_FILE "/etc/modembridge.conf"
 #define DEFAULT_PID_FILE    "/var/run/modembridge.pid"
 #define DEFAULT_DATALOG_FILE "modembridge.log"
 
-/* Return codes */
+/* Return codes - Enhanced from modem_sample */
 #define SUCCESS             0
 #define ERROR_GENERAL       -1
 #define ERROR_INVALID_ARG   -2
@@ -48,6 +52,24 @@
 #define ERROR_TIMEOUT       -4
 #define ERROR_CONNECTION    -5
 #define ERROR_CONFIG        -6
+#define ERROR_HANGUP        -7  /* Carrier lost / connection hangup */
+#define ERROR_MODEM         -8  /* Modem command error (ERROR response) */
+#define ERROR_NO_CARRIER    -9  /* NO CARRIER response from modem */
+#define ERROR_BUSY          -10 /* BUSY response from modem */
+#define ERROR_NO_DIALTONE   -11 /* NO DIALTONE response from modem */
+#define ERROR_NO_ANSWER     -12 /* NO ANSWER response from modem */
+#define ERROR_PARTIAL       -13 /* Partial write/read operation */
+#define ERROR_SERIAL        -14 /* Serial port specific error */
+
+/* Level 2 Telnet specific error codes */
+#define ERROR_TELNET        -15 /* Telnet protocol error */
+#define ERROR_BUFFER_FULL   -16 /* Buffer is full */
+#define ERROR_PROTOCOL      -17 /* Protocol negotiation error */
+#define ERROR_SYSTEM        -18 /* System call error */
+#define ERROR_THREAD        -19 /* Thread creation/management error */
+
+/* Helper function for error strings */
+const char* error_to_string(int error_code);
 
 /* Logging macros (prefixed with MB_ to avoid syslog.h conflicts) */
 #ifdef DEBUG
@@ -97,5 +119,6 @@ char *trim_whitespace(char *str);
 int daemonize(void);
 int write_pid_file(const char *pid_file);
 int remove_pid_file(const char *pid_file);
+void log_transmission(const char *tag, const char *data, int len);
 
 #endif /* MODEMBRIDGE_COMMON_H */

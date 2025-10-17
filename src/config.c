@@ -42,6 +42,11 @@ void config_init(config_t *cfg)
     cfg->data_bits = 8;
     cfg->stop_bits = 1;
     cfg->flow_control = FLOW_RTSCTS;
+    cfg->modem_init_command[0] = '\0';
+    cfg->modem_autoanswer_mode = 0;  /* Default: SOFTWARE mode (S0=0, manual ATA) */
+    cfg->modem_autoanswer_software_command[0] = '\0';
+    cfg->modem_autoanswer_hardware_command[0] = '\0';
+    cfg->modem_command[0] = '\0';  /* Health check commands */
 
     /* Default telnet settings */
     SAFE_STRNCPY(cfg->telnet_host, "127.0.0.1", sizeof(cfg->telnet_host));
@@ -55,6 +60,13 @@ void config_init(config_t *cfg)
     /* Default data logging options */
     cfg->data_log_enabled = false;
     SAFE_STRNCPY(cfg->data_log_file, DEFAULT_DATALOG_FILE, sizeof(cfg->data_log_file));
+
+    /* Default echo functionality options (Level 1) */
+    cfg->echo_enabled = false;              /* Disabled by default for easy on/off */
+    cfg->echo_immediate = true;             /* Immediate echo mode */
+    cfg->echo_first_delay = 5;              /* 5 seconds delay before first echo */
+    cfg->echo_min_interval = 2;             /* Minimum 2 seconds between echoes */
+    SAFE_STRNCPY(cfg->echo_prefix, "[from server]", sizeof(cfg->echo_prefix));
 
     MB_LOG_DEBUG("Configuration initialized with defaults");
 }
@@ -134,6 +146,43 @@ static int parse_config_line(config_t *cfg, char *line)
     else if (strcasecmp(key, "FLOW") == 0) {
         cfg->flow_control = config_str_to_flow(value);
     }
+    else if (strcasecmp(key, "MODEM_INIT_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_init_command, value, sizeof(cfg->modem_init_command));
+        MB_LOG_DEBUG("Modem init command configured: %s", cfg->modem_init_command);
+    }
+    else if (strcasecmp(key, "MODEM_AUTOANSWER_MODE") == 0) {
+        cfg->modem_autoanswer_mode = atoi(value);
+        if (cfg->modem_autoanswer_mode != 0 && cfg->modem_autoanswer_mode != 1) {
+            MB_LOG_WARNING("Invalid MODEM_AUTOANSWER_MODE: %d (must be 0 or 1), using 0 (SOFTWARE)", cfg->modem_autoanswer_mode);
+            cfg->modem_autoanswer_mode = 0;
+        }
+        MB_LOG_DEBUG("Modem autoanswer mode configured: %d (%s)",
+                    cfg->modem_autoanswer_mode,
+                    cfg->modem_autoanswer_mode == 0 ? "SOFTWARE" : "HARDWARE");
+    }
+    else if (strcasecmp(key, "MODEM_AUTOANSWER_SOFTWARE_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_autoanswer_software_command, value, sizeof(cfg->modem_autoanswer_software_command));
+        MB_LOG_DEBUG("Modem autoanswer SOFTWARE command configured: %s", cfg->modem_autoanswer_software_command);
+    }
+    else if (strcasecmp(key, "MODEM_AUTOANSWER_HARDWARE_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_autoanswer_hardware_command, value, sizeof(cfg->modem_autoanswer_hardware_command));
+        MB_LOG_DEBUG("Modem autoanswer HARDWARE command configured: %s", cfg->modem_autoanswer_hardware_command);
+    }
+    /* Backward compatibility: MODEM_AUTOANSWER_COMMAND maps to SOFTWARE mode */
+    else if (strcasecmp(key, "MODEM_AUTOANSWER_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_autoanswer_software_command, value, sizeof(cfg->modem_autoanswer_software_command));
+        MB_LOG_WARNING("MODEM_AUTOANSWER_COMMAND is deprecated, use MODEM_AUTOANSWER_SOFTWARE_COMMAND instead");
+    }
+    /* Backward compatibility: MODEM_COMMAND maps to MODEM_INIT_COMMAND */
+    else if (strcasecmp(key, "MODEM_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_init_command, value, sizeof(cfg->modem_init_command));
+        MB_LOG_WARNING("MODEM_COMMAND is deprecated, use MODEM_INIT_COMMAND instead");
+    }
+    /* New health check commands */
+    else if (strcasecmp(key, "MODEM_HEALTH_COMMAND") == 0) {
+        SAFE_STRNCPY(cfg->modem_command, value, sizeof(cfg->modem_command));
+        MB_LOG_DEBUG("Modem health check command configured: %s", cfg->modem_command);
+    }
     else if (strcasecmp(key, "TELNET_HOST") == 0) {
         SAFE_STRNCPY(cfg->telnet_host, value, sizeof(cfg->telnet_host));
     }
@@ -145,6 +194,35 @@ static int parse_config_line(config_t *cfg, char *line)
     }
     else if (strcasecmp(key, "DATA_LOG_FILE") == 0) {
         SAFE_STRNCPY(cfg->data_log_file, value, sizeof(cfg->data_log_file));
+    }
+    /* Echo functionality options (Level 1) */
+    else if (strcasecmp(key, "ECHO_ENABLED") == 0) {
+        cfg->echo_enabled = (atoi(value) != 0);
+        MB_LOG_DEBUG("Echo functionality enabled: %s", cfg->echo_enabled ? "YES" : "NO");
+    }
+    else if (strcasecmp(key, "ECHO_IMMEDIATE") == 0) {
+        cfg->echo_immediate = (atoi(value) != 0);
+        MB_LOG_DEBUG("Echo immediate mode: %s", cfg->echo_immediate ? "YES" : "NO");
+    }
+    else if (strcasecmp(key, "ECHO_FIRST_DELAY") == 0) {
+        cfg->echo_first_delay = atoi(value);
+        if (cfg->echo_first_delay < 0) {
+            MB_LOG_WARNING("Invalid ECHO_FIRST_DELAY: %d, using 0", cfg->echo_first_delay);
+            cfg->echo_first_delay = 0;
+        }
+        MB_LOG_DEBUG("Echo first delay: %d seconds", cfg->echo_first_delay);
+    }
+    else if (strcasecmp(key, "ECHO_MIN_INTERVAL") == 0) {
+        cfg->echo_min_interval = atoi(value);
+        if (cfg->echo_min_interval < 1) {
+            MB_LOG_WARNING("Invalid ECHO_MIN_INTERVAL: %d, using 1", cfg->echo_min_interval);
+            cfg->echo_min_interval = 1;
+        }
+        MB_LOG_DEBUG("Echo minimum interval: %d seconds", cfg->echo_min_interval);
+    }
+    else if (strcasecmp(key, "ECHO_PREFIX") == 0) {
+        SAFE_STRNCPY(cfg->echo_prefix, value, sizeof(cfg->echo_prefix));
+        MB_LOG_DEBUG("Echo prefix: '%s'", cfg->echo_prefix);
     }
     else {
         MB_LOG_WARNING("Unknown config key: %s", key);
@@ -260,12 +338,24 @@ void config_print(const config_t *cfg)
     printf("  Data bits:  %d\n", cfg->data_bits);
     printf("  Stop bits:  %d\n", cfg->stop_bits);
     printf("  Flow ctrl:  %s\n", config_flow_to_str(cfg->flow_control));
+    printf("Modem:\n");
+    printf("  Init cmd:   %s\n", cfg->modem_init_command[0] ? cfg->modem_init_command : "(none)");
+    printf("  AA mode:    %d (%s)\n", cfg->modem_autoanswer_mode,
+           cfg->modem_autoanswer_mode == 0 ? "SOFTWARE" : "HARDWARE");
+    printf("  AA SW cmd:  %s\n", cfg->modem_autoanswer_software_command[0] ? cfg->modem_autoanswer_software_command : "(none)");
+    printf("  AA HW cmd:  %s\n", cfg->modem_autoanswer_hardware_command[0] ? cfg->modem_autoanswer_hardware_command : "(none)");
     printf("Telnet:\n");
     printf("  Host:       %s\n", cfg->telnet_host);
     printf("  Port:       %d\n", cfg->telnet_port);
     printf("Data Logging:\n");
     printf("  Enabled:    %s\n", cfg->data_log_enabled ? "yes" : "no");
     printf("  File:       %s\n", cfg->data_log_file);
+    printf("Echo Functionality:\n");
+    printf("  Enabled:    %s\n", cfg->echo_enabled ? "yes" : "no");
+    printf("  Immediate:  %s\n", cfg->echo_immediate ? "yes" : "no");
+    printf("  First delay: %d seconds\n", cfg->echo_first_delay);
+    printf("  Min interval: %d seconds\n", cfg->echo_min_interval);
+    printf("  Prefix:     '%s'\n", cfg->echo_prefix);
     printf("====================\n");
 
     /* Also log to syslog */
@@ -277,12 +367,24 @@ void config_print(const config_t *cfg)
     MB_LOG_INFO("  Data bits:  %d", cfg->data_bits);
     MB_LOG_INFO("  Stop bits:  %d", cfg->stop_bits);
     MB_LOG_INFO("  Flow ctrl:  %s", config_flow_to_str(cfg->flow_control));
+    MB_LOG_INFO("Modem:");
+    MB_LOG_INFO("  Init cmd:   %s", cfg->modem_init_command[0] ? cfg->modem_init_command : "(none)");
+    MB_LOG_INFO("  AA mode:    %d (%s)", cfg->modem_autoanswer_mode,
+               cfg->modem_autoanswer_mode == 0 ? "SOFTWARE" : "HARDWARE");
+    MB_LOG_INFO("  AA SW cmd:  %s", cfg->modem_autoanswer_software_command[0] ? cfg->modem_autoanswer_software_command : "(none)");
+    MB_LOG_INFO("  AA HW cmd:  %s", cfg->modem_autoanswer_hardware_command[0] ? cfg->modem_autoanswer_hardware_command : "(none)");
     MB_LOG_INFO("Telnet:");
     MB_LOG_INFO("  Host:       %s", cfg->telnet_host);
     MB_LOG_INFO("  Port:       %d", cfg->telnet_port);
     MB_LOG_INFO("Data Logging:");
     MB_LOG_INFO("  Enabled:    %s", cfg->data_log_enabled ? "yes" : "no");
     MB_LOG_INFO("  File:       %s", cfg->data_log_file);
+    MB_LOG_INFO("Echo Functionality:");
+    MB_LOG_INFO("  Enabled:    %s", cfg->echo_enabled ? "yes" : "no");
+    MB_LOG_INFO("  Immediate:  %s", cfg->echo_immediate ? "yes" : "no");
+    MB_LOG_INFO("  First delay: %d seconds", cfg->echo_first_delay);
+    MB_LOG_INFO("  Min interval: %d seconds", cfg->echo_min_interval);
+    MB_LOG_INFO("  Prefix:     '%s'", cfg->echo_prefix);
     MB_LOG_INFO("====================");
 }
 

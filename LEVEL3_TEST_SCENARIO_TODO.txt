@@ -1,0 +1,281 @@
+# Level 3 Test Scenario Checklist
+# ModemBridge Level 3 (Pipeline Management) Testing
+#
+# This file tracks the testing progress of Level 3 functionality.
+# Update status as testing progresses: [TODO] → [IN PROGRESS] → [DONE] or [FAIL]
+#
+# Test Date: ____________________
+# Tester: ________________________
+# Build: make level3
+
+================================================================================
+TEST ENVIRONMENT SETUP
+================================================================================
+
+[ ] 1. Test Environment Preparation
+    - telnet server running on localhost:9091
+    - telnet server configured to send periodic timestamps
+    - telnet server configured to echo received data
+    - modembridge.conf configured with TELNET_HOST=127.0.0.1, TELNET_PORT=9091
+    - Serial port device available (e.g., /dev/ttyUSB0 or virtual serial port)
+    - Terminal emulator ready for client connection (minicom, screen, or cu)
+
+================================================================================
+STEP-BY-STEP TEST SCENARIO
+================================================================================
+
+[ ] STEP 1: Program Execution
+    Command: ./build/modembridge -c modembridge.conf -v
+
+    Expected:
+    - Program starts without errors
+    - Logs show "ModemBridge starting" message
+    - Level 1, 2, 3 initialization messages appear
+    - No immediate errors or crashes
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 2: Modem Connection Waiting
+
+    Expected:
+    - Program enters modem connection waiting state
+    - Serial port opened successfully
+    - Log shows "Waiting for modem connection" or similar
+    - No telnet connection attempted yet (Level 2 waits for Level 1)
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 3: Client Connects to Modem
+    Command: minicom -D /dev/ttyUSB0  (or appropriate terminal emulator)
+
+    Expected:
+    - Client terminal opens
+    - Serial connection established
+    - Modem responds to client connection
+    - Program logs show "Modem client connected" or similar
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 4: Modem Connection Established
+
+    Expected:
+    - Modem connection fully established
+    - Client can send AT commands
+    - Modem responds with OK to basic commands (AT, ATE1)
+    - Level 1 reports "connected" state
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 5: Telnet Server Connection (Internal)
+    Trigger: Client sends ATDT command (e.g., ATDT9091)
+
+    Expected:
+    - Program initiates telnet connection to localhost:9091
+    - Level 2 telnet module connects to server
+    - Connection success logged
+    - Modem sends "CONNECT" response to client
+    - Client enters online/data mode
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 6: Level 3 Pipeline Construction
+
+    Expected:
+    - Level 1 (serial/modem) is in connected state
+    - Level 2 (telnet) is in connected state
+    - Level 3 establishes bidirectional pipeline:
+      * Serial → Level 1 → Level 3 → Level 2 → Telnet Server
+      * Telnet Server → Level 2 → Level 3 → Level 1 → Serial
+    - Logs show "Level 3 pipeline active" or similar
+    - Data flow monitoring initialized
+
+    Actual Result:
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 7: Timestamp Reception (Telnet → Client)
+
+    Expected:
+    - Periodic timestamps from telnet server appear on client terminal
+    - Timestamps format: "[HH:MM:SS] Timestamp from server" or similar
+    - Timestamps arrive at expected intervals (e.g., every 5-10 seconds)
+    - No data corruption or missing characters
+    - Client terminal displays timestamps correctly
+
+    Test Duration: Observe for at least 60 seconds
+
+    Actual Result:
+    Sample timestamps received:
+    ____________________________________________________________________________
+    ____________________________________________________________________________
+    ____________________________________________________________________________
+
+    Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 8: Echo Test (Client → Telnet → Client)
+
+    Test Strings:
+    a) ASCII: "abcd"
+    b) Korean: "한글"
+    c) Japanese: "こんにちは。"
+
+    Expected for each test string:
+    - Client types the string
+    - String transmitted through pipeline: Client → Level 1 → Level 3 → Level 2 → Telnet
+    - Telnet server echoes the string back
+    - Echo returned through pipeline: Telnet → Level 2 → Level 3 → Level 1 → Client
+    - Client terminal displays the echoed string correctly
+    - No character corruption or loss
+    - Multibyte characters (Korean, Japanese) display correctly
+
+    Test Results:
+
+    Test a) "abcd":
+    Sent: _____________________________________________________________________
+    Received: _________________________________________________________________
+    Status: [ ] PASS  [ ] FAIL
+
+    Test b) "한글":
+    Sent: _____________________________________________________________________
+    Received: _________________________________________________________________
+    Status: [ ] PASS  [ ] FAIL
+
+    Test c) "こんにちは。":
+    Sent: _____________________________________________________________________
+    Received: _________________________________________________________________
+    Status: [ ] PASS  [ ] FAIL
+
+    Overall Echo Test Status: [ ] PASS  [ ] FAIL
+    Notes: _____________________________________________________________________
+
+
+================================================================================
+ADDITIONAL TESTS (Optional but Recommended)
+================================================================================
+
+[ ] STEP 9: Long Message Test
+    - Send message longer than 256 bytes
+    - Verify complete transmission and echo
+    - Check for buffer overflow issues
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 10: Rapid Input Test
+    - Type rapidly without pausing
+    - Verify all characters are transmitted and echoed
+    - Check for data loss under load
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 11: Escape Sequence Test (+++)
+    - Send escape sequence "+++" (Hayes modem escape)
+    - Verify modem returns to command mode
+    - Check if telnet connection remains active
+    - Send ATH to hang up
+    - Verify telnet disconnection
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+[ ] STEP 12: Reconnection Test
+    - After hangup, send ATDT again
+    - Verify telnet reconnects
+    - Verify pipeline re-established
+    - Verify data flow resumes correctly
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+================================================================================
+ERROR CASES / EDGE CASES
+================================================================================
+
+[ ] ERROR 1: Telnet Server Not Available
+    - Stop telnet server
+    - Attempt ATDT connection
+    - Expected: "NO CARRIER" or appropriate error message
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+[ ] ERROR 2: Telnet Connection Loss During Session
+    - Establish connection
+    - Kill telnet server during active session
+    - Expected: Connection dropped, "NO CARRIER" to client
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+[ ] ERROR 3: Serial Port Disconnect
+    - Establish full pipeline
+    - Disconnect serial port (if possible with test setup)
+    - Expected: Graceful handling, no crash
+
+    Status: [ ] PASS  [ ] FAIL  [ ] SKIPPED
+    Notes: _____________________________________________________________________
+
+
+================================================================================
+FINAL RESULTS SUMMARY
+================================================================================
+
+Total Tests: ______
+Passed: ______
+Failed: ______
+Skipped: ______
+
+Critical Issues Found:
+________________________________________________________________________________
+________________________________________________________________________________
+________________________________________________________________________________
+
+Performance Observations:
+________________________________________________________________________________
+________________________________________________________________________________
+________________________________________________________________________________
+
+Level 3 Pipeline Status: [ ] WORKING  [ ] NEEDS FIX  [ ] MAJOR ISSUES
+
+Tester Signature: ____________________  Date: ____________________
+
+================================================================================
+END OF TEST SCENARIO
+================================================================================

@@ -1,9 +1,16 @@
 /*
- * telnet.c - Telnet client protocol implementation
+ * telnet.c - Telnet client protocol implementation (Level 2 Independent)
  */
 
 #include "telnet.h"
 #include "datalog.h"
+#include <time.h>
+
+/* Level 2 only: No bridge dependency for isolation */
+
+/* Forward declaration for UTF-8 functions (normally in bridge.h) */
+static bool is_utf8_start(unsigned char byte);
+static int utf8_sequence_length(unsigned char byte);
 
 /**
  * Initialize telnet structure
@@ -16,7 +23,9 @@ void telnet_init(telnet_t *tn)
 
     memset(tn, 0, sizeof(telnet_t));
     tn->fd = -1;
+    tn->epoll_fd = -1;
     tn->is_connected = false;
+    tn->is_connecting = false;
     tn->state = TELNET_STATE_DATA;
 
     /* Initialize option tracking */
@@ -36,7 +45,33 @@ void telnet_init(telnet_t *tn)
     /* No data logger by default */
     tn->datalog = NULL;
 
-    MB_LOG_DEBUG("Telnet initialized");
+    /* Initialize epoll state */
+    tn->can_read = false;
+    tn->can_write = false;
+    tn->has_error = false;
+    tn->event_count = 0;
+
+    /* Initialize buffers */
+    tn->read_pos = 0;
+    tn->read_len = 0;
+    tn->write_pos = 0;
+    tn->write_len = 0;
+
+    /* Initialize connection health monitoring */
+    tn->last_activity = time(NULL);
+    tn->last_ping = 0;
+    tn->ping_interval = 30;      /* Default: 30 seconds */
+    tn->connection_timeout = 120; /* Default: 2 minutes */
+    tn->keep_alive_enabled = true;
+
+    /* Initialize error handling */
+    tn->consecutive_errors = 0;
+    tn->max_consecutive_errors = 3;    /* Default: reconnect after 3 errors */
+    tn->last_error_time = 0;
+    tn->auto_reconnect = true;         /* Default: enable auto-reconnect */
+    tn->reconnect_interval = 10;       /* Default: wait 10 seconds before reconnect */
+
+    MB_LOG_DEBUG("Telnet initialized with epoll support, keep-alive, and error handling");
 }
 
 /**
@@ -96,26 +131,38 @@ int telnet_connect(telnet_t *tn, const char *host, int port)
             return ERROR_CONNECTION;
         }
         /* Connection in progress for non-blocking socket */
+        tn->is_connecting = true;
+        MB_LOG_INFO("Non-blocking connection in progress");
+    } else {
+        /* Connection completed immediately */
+        tn->is_connecting = false;
+        tn->is_connected = true;
+        MB_LOG_INFO("Connected to telnet server immediately");
     }
 
     /* Save connection info */
     SAFE_STRNCPY(tn->host, host, sizeof(tn->host));
     tn->port = port;
-    tn->is_connected = true;
 
-    MB_LOG_INFO("Connected to telnet server");
+    /* Initialize epoll for event-driven I/O */
+    if (telnet_init_epoll(tn) != SUCCESS) {
+        MB_LOG_ERROR("Failed to initialize epoll");
+        close(tn->fd);
+        tn->fd = -1;
+        tn->is_connected = false;
+        tn->is_connecting = false;
+        return ERROR_IO;
+    }
 
-    /* Send initial option negotiations */
-    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_BINARY);
-    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_SGA);
-    telnet_send_negotiate(tn, TELNET_DO, TELOPT_SGA);
-    telnet_send_negotiate(tn, TELNET_DO, TELOPT_ECHO);
-
-    /* Offer TERMINAL-TYPE support (RFC 1091) */
-    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_TTYPE);
-
-    /* Offer LINEMODE support (RFC 1184) - character mode by default */
-    telnet_send_negotiate(tn, TELNET_WILL, TELOPT_LINEMODE);
+    /* Send initial option negotiations only if already connected */
+    if (tn->is_connected) {
+        telnet_send_negotiate(tn, TELNET_WILL, TELOPT_BINARY);
+        telnet_send_negotiate(tn, TELNET_WILL, TELOPT_SGA);
+        telnet_send_negotiate(tn, TELNET_DO, TELOPT_SGA);
+        telnet_send_negotiate(tn, TELNET_DO, TELOPT_ECHO);
+        telnet_send_negotiate(tn, TELNET_WILL, TELOPT_TTYPE);
+        telnet_send_negotiate(tn, TELNET_WILL, TELOPT_LINEMODE);
+    }
 
     return SUCCESS;
 }
@@ -129,19 +176,40 @@ int telnet_disconnect(telnet_t *tn)
         return ERROR_INVALID_ARG;
     }
 
-    if (!tn->is_connected || tn->fd < 0) {
-        return SUCCESS;
+    if (tn->fd < 0) {
+        return SUCCESS;  /* Already disconnected */
     }
 
     MB_LOG_INFO("Disconnecting from telnet server: %s:%d", tn->host, tn->port);
 
+    /* Close epoll instance */
+    if (tn->epoll_fd >= 0) {
+        close(tn->epoll_fd);
+        tn->epoll_fd = -1;
+        MB_LOG_DEBUG("Epoll instance closed");
+    }
+
+    /* Close socket */
     close(tn->fd);
     tn->fd = -1;
-    tn->is_connected = false;
 
-    /* Reset state */
+    /* Reset connection state */
+    tn->is_connected = false;
+    tn->is_connecting = false;
+    tn->can_read = false;
+    tn->can_write = false;
+    tn->has_error = false;
+    tn->event_count = 0;
+
+    /* Reset protocol state */
     tn->state = TELNET_STATE_DATA;
     tn->sb_len = 0;
+
+    /* Reset buffers */
+    tn->read_pos = 0;
+    tn->read_len = 0;
+    tn->write_pos = 0;
+    tn->write_len = 0;
 
     MB_LOG_INFO("Telnet disconnected");
 
@@ -488,12 +556,13 @@ int telnet_handle_subnegotiation(telnet_t *tn)
 }
 
 /**
- * Process incoming data from telnet server
+ * Process incoming data from telnet server (enhanced with UTF-8 safety)
  */
 int telnet_process_input(telnet_t *tn, const unsigned char *input, size_t input_len,
                          unsigned char *output, size_t output_size, size_t *output_len)
 {
     size_t out_pos = 0;
+    static bool overflow_warned = false;
 
     if (tn == NULL || input == NULL || output == NULL || output_len == NULL) {
         return ERROR_INVALID_ARG;
@@ -509,16 +578,23 @@ int telnet_process_input(telnet_t *tn, const unsigned char *input, size_t input_
                 if (c == TELNET_IAC) {
                     tn->state = TELNET_STATE_IAC;
                 } else {
-                    /* Regular data */
+                    /* Regular data with UTF-8 safety check */
                     if (out_pos < output_size) {
+                        /* Check if this character would split a UTF-8 sequence at buffer boundary */
+                        if (is_utf8_start(c) && (out_pos + utf8_sequence_length(c) > output_size)) {
+                            /* Would split UTF-8 sequence - stop processing to prevent corruption */
+                            MB_LOG_DEBUG("Stopping near buffer boundary to protect UTF-8 sequence (seq_len=%d, space=%zu)",
+                                       utf8_sequence_length(c), output_size - out_pos);
+                            break;
+                        }
                         output[out_pos++] = c;
                     } else {
                         /* Buffer full - log warning once */
-                        static bool overflow_warned = false;
                         if (!overflow_warned) {
                             MB_LOG_WARNING("Telnet input buffer full - data may be truncated (multibyte chars may break)");
                             overflow_warned = true;
                         }
+                        break;  /* Stop processing on buffer full */
                     }
                 }
                 break;
@@ -738,6 +814,10 @@ ssize_t telnet_send(telnet_t *tn, const void *data, size_t len)
         return ERROR_IO;
     }
 
+    if (sent > 0) {
+        telnet_update_activity(tn);  /* Update activity on successful send */
+    }
+
     return sent;
 }
 
@@ -771,6 +851,10 @@ ssize_t telnet_recv(telnet_t *tn, void *buffer, size_t size)
         MB_LOG_INFO("Telnet connection closed by server");
         tn->is_connected = false;
         return 0;
+    }
+
+    if (n > 0) {
+        telnet_update_activity(tn);  /* Update activity on successful recv */
     }
 
     MB_LOG_DEBUG("Telnet received %zd bytes", n);
@@ -824,4 +908,575 @@ bool telnet_is_binary_mode(telnet_t *tn)
     }
 
     return tn->binary_mode;
+}
+
+/* Epoll-based network functions */
+
+/**
+ * Initialize epoll for telnet connection
+ */
+int telnet_init_epoll(telnet_t *tn)
+{
+    if (tn == NULL || tn->fd < 0) {
+        MB_LOG_ERROR("Invalid telnet context for epoll initialization");
+        return ERROR_INVALID_ARG;
+    }
+
+    /* Create epoll instance */
+    tn->epoll_fd = epoll_create1(0);
+    if (tn->epoll_fd < 0) {
+        MB_LOG_ERROR("Failed to create epoll instance: %s", strerror(errno));
+        return ERROR_IO;
+    }
+
+    /* Add socket to epoll for read/write events */
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;  /* Edge-triggered mode */
+    ev.data.fd = tn->fd;
+
+    if (epoll_ctl(tn->epoll_fd, EPOLL_CTL_ADD, tn->fd, &ev) < 0) {
+        MB_LOG_ERROR("Failed to add socket to epoll: %s", strerror(errno));
+        close(tn->epoll_fd);
+        tn->epoll_fd = -1;
+        return ERROR_IO;
+    }
+
+    /* Initialize event state */
+    tn->can_read = false;
+    tn->can_write = true;  /* Socket is initially writable */
+    tn->has_error = false;
+    tn->event_count = 0;
+
+    /* Initialize buffers */
+    tn->read_pos = 0;
+    tn->read_len = 0;
+    tn->write_pos = 0;
+    tn->write_len = 0;
+
+    MB_LOG_INFO("Epoll initialized for telnet connection (fd=%d, epoll_fd=%d)", tn->fd, tn->epoll_fd);
+    return SUCCESS;
+}
+
+/**
+ * Process epoll events for telnet connection
+ */
+int telnet_process_events(telnet_t *tn, int timeout_ms)
+{
+    if (tn == NULL || tn->epoll_fd < 0) {
+        MB_LOG_ERROR("Invalid epoll context for event processing");
+        return ERROR_INVALID_ARG;
+    }
+
+    /* Wait for events */
+    tn->event_count = epoll_wait(tn->epoll_fd, tn->events, 8, timeout_ms);
+    if (tn->event_count < 0) {
+        if (errno == EINTR) {
+            /* Interrupted by signal, not an error */
+            return SUCCESS;
+        }
+        MB_LOG_ERROR("Epoll wait error: %s", strerror(errno));
+        return ERROR_IO;
+    }
+
+    /* Reset event flags */
+    tn->can_read = false;
+    tn->can_write = false;
+    tn->has_error = false;
+
+    /* Process events */
+    for (int i = 0; i < tn->event_count; i++) {
+        struct epoll_event *ev = &tn->events[i];
+
+        if (ev->events & EPOLLIN) {
+            tn->can_read = true;
+            MB_LOG_DEBUG("Telnet socket readable (fd=%d)", ev->data.fd);
+        }
+
+        if (ev->events & EPOLLOUT) {
+            tn->can_write = true;
+            MB_LOG_DEBUG("Telnet socket writable (fd=%d)", ev->data.fd);
+        }
+
+        if (ev->events & EPOLLERR) {
+            tn->has_error = true;
+            MB_LOG_WARNING("Telnet socket error condition (fd=%d)", ev->data.fd);
+        }
+
+        if (ev->events & EPOLLHUP) {
+            tn->has_error = true;
+            MB_LOG_INFO("Telnet socket hangup (fd=%d)", ev->data.fd);
+        }
+    }
+
+    /* Handle connection completion for non-blocking connect */
+    if (tn->is_connecting && tn->can_write) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(tn->fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+            MB_LOG_ERROR("Failed to get socket error: %s", strerror(errno));
+            tn->is_connected = false;
+            tn->is_connecting = false;
+            return ERROR_CONNECTION;
+        }
+
+        if (error == 0) {
+            /* Connection successful */
+            tn->is_connected = true;
+            tn->is_connecting = false;
+            MB_LOG_INFO("Non-blocking connection completed successfully");
+
+            /* Send initial option negotiations */
+            telnet_send_negotiate(tn, TELNET_WILL, TELOPT_BINARY);
+            telnet_send_negotiate(tn, TELNET_WILL, TELOPT_SGA);
+            telnet_send_negotiate(tn, TELNET_DO, TELOPT_SGA);
+            telnet_send_negotiate(tn, TELNET_DO, TELOPT_ECHO);
+            telnet_send_negotiate(tn, TELNET_WILL, TELOPT_TTYPE);
+            telnet_send_negotiate(tn, TELNET_WILL, TELOPT_LINEMODE);
+        } else {
+            /* Connection failed */
+            MB_LOG_ERROR("Connection failed: %s", strerror(error));
+            tn->is_connected = false;
+            tn->is_connecting = false;
+            return ERROR_CONNECTION;
+        }
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Check if telnet connection is ready for reading
+ */
+bool telnet_can_read(telnet_t *tn)
+{
+    if (tn == NULL) {
+        return false;
+    }
+
+    return tn->can_read && tn->is_connected;
+}
+
+/**
+ * Check if telnet connection is ready for writing
+ */
+bool telnet_can_write(telnet_t *tn)
+{
+    if (tn == NULL) {
+        return false;
+    }
+
+    return tn->can_write && tn->is_connected;
+}
+
+/**
+ * Check if telnet connection has error
+ */
+bool telnet_has_error(telnet_t *tn)
+{
+    if (tn == NULL) {
+        return true;
+    }
+
+    return tn->has_error || !tn->is_connected;
+}
+
+/**
+ * Queue data for writing to telnet connection (non-blocking)
+ */
+int telnet_queue_write(telnet_t *tn, const void *data, size_t len)
+{
+    if (tn == NULL || data == NULL || tn->fd < 0) {
+        return ERROR_INVALID_ARG;
+    }
+
+    if (!tn->is_connected) {
+        return ERROR_CONNECTION;
+    }
+
+    if (len == 0) {
+        return SUCCESS;
+    }
+
+    /* Check available space in write buffer */
+    size_t available_space = sizeof(tn->write_buf) - tn->write_len;
+    if (len > available_space) {
+        MB_LOG_WARNING("Write buffer full: %zu bytes needed, %zu available (dropping data)",
+                      len, available_space);
+        return ERROR_BUFFER_FULL;
+    }
+
+    /* Copy data to write buffer */
+    memcpy(tn->write_buf + tn->write_len, data, len);
+    tn->write_len += len;
+
+    MB_LOG_DEBUG("Queued %zu bytes for telnet write (buffer now has %zu bytes)",
+                len, tn->write_len);
+
+    return SUCCESS;
+}
+
+/**
+ * Process pending write data for telnet connection (enhanced with partial send handling)
+ */
+int telnet_flush_writes(telnet_t *tn)
+{
+    if (tn == NULL || tn->fd < 0) {
+        return ERROR_INVALID_ARG;
+    }
+
+    if (!tn->can_write || tn->write_len == 0) {
+        return SUCCESS;  /* Nothing to write or not ready */
+    }
+
+    /* Write pending data from write buffer */
+    size_t remaining = tn->write_len - tn->write_pos;
+    ssize_t sent = send(tn->fd, tn->write_buf + tn->write_pos, remaining, MSG_NOSIGNAL);
+
+    if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Would block, try again later */
+            MB_LOG_DEBUG("Write would block, %zu bytes remain pending", remaining);
+            return SUCCESS;
+        }
+        MB_LOG_ERROR("Failed to send pending data: %s", strerror(errno));
+        return ERROR_IO;
+    }
+
+    tn->write_pos += sent;
+    MB_LOG_DEBUG("Sent %zd of %zu pending bytes, total sent: %zu", sent, remaining, tn->write_pos);
+
+    /* Update activity on successful send */
+    if (sent > 0) {
+        telnet_update_activity(tn);
+    }
+
+    /* Clear buffer if all data sent */
+    if (tn->write_pos >= tn->write_len) {
+        tn->write_pos = 0;
+        tn->write_len = 0;
+        MB_LOG_DEBUG("All pending data sent, write buffer cleared");
+    } else {
+        /* Move remaining data to beginning of buffer for better memory usage */
+        if (tn->write_pos > 0) {
+            size_t remaining_data = tn->write_len - tn->write_pos;
+            memmove(tn->write_buf, tn->write_buf + tn->write_pos, remaining_data);
+            tn->write_len = remaining_data;
+            tn->write_pos = 0;
+            MB_LOG_DEBUG("Compacted write buffer: %zu bytes remaining", remaining_data);
+        }
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Process pending read data for telnet connection
+ */
+int telnet_process_reads(telnet_t *tn, unsigned char *output, size_t output_size, size_t *output_len)
+{
+    if (tn == NULL || tn->fd < 0 || output == NULL || output_len == NULL) {
+        return ERROR_INVALID_ARG;
+    }
+
+    *output_len = 0;
+
+    if (!tn->can_read) {
+        return SUCCESS;  /* No data to read */
+    }
+
+    /* Read data into read buffer */
+    ssize_t received = recv(tn->fd, tn->read_buf + tn->read_len,
+                           sizeof(tn->read_buf) - tn->read_len, 0);
+
+    if (received < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* No more data available */
+            return SUCCESS;
+        }
+        MB_LOG_ERROR("Failed to receive data: %s", strerror(errno));
+        return ERROR_IO;
+    }
+
+    if (received == 0) {
+        /* Connection closed */
+        MB_LOG_INFO("Telnet connection closed by server");
+        tn->is_connected = false;
+        return SUCCESS;
+    }
+
+    tn->read_len += received;
+    MB_LOG_DEBUG("Received %zd bytes, read buffer now has %zu bytes", received, tn->read_len);
+
+    /* Process all available data through telnet protocol parser */
+    size_t total_processed = 0;
+    while (tn->read_pos < tn->read_len) {
+        unsigned char clean_output[BUFFER_SIZE];
+        size_t clean_len = 0;
+
+        /* Process a chunk of data */
+        size_t chunk_size = tn->read_len - tn->read_pos;
+        if (chunk_size > BUFFER_SIZE / 2) {
+            chunk_size = BUFFER_SIZE / 2;
+        }
+
+        int result = telnet_process_input(tn, tn->read_buf + tn->read_pos, chunk_size,
+                                        clean_output, sizeof(clean_output), &clean_len);
+        if (result != SUCCESS) {
+            MB_LOG_ERROR("Failed to process telnet input: %d", result);
+            return result;
+        }
+
+        tn->read_pos += chunk_size;
+
+        /* Copy clean data to output if there's space */
+        if (total_processed + clean_len <= output_size) {
+            memcpy(output + total_processed, clean_output, clean_len);
+            total_processed += clean_len;
+        } else {
+            /* Output buffer full */
+            MB_LOG_WARNING("Output buffer full, processed %zu of %zu clean bytes",
+                          total_processed, total_processed + clean_len);
+            break;
+        }
+    }
+
+    *output_len = total_processed;
+
+    /* Compact read buffer if we've consumed data */
+    if (tn->read_pos >= tn->read_len) {
+        tn->read_pos = 0;
+        tn->read_len = 0;
+    } else if (tn->read_pos > 0) {
+        /* Move remaining data to beginning of buffer */
+        memmove(tn->read_buf, tn->read_buf + tn->read_pos, tn->read_len - tn->read_pos);
+        tn->read_len -= tn->read_pos;
+        tn->read_pos = 0;
+    }
+
+    if (total_processed > 0) {
+        MB_LOG_DEBUG("Processed telnet input: %zu clean bytes", total_processed);
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Update activity timestamp (called on send/receive)
+ */
+void telnet_update_activity(telnet_t *tn)
+{
+    if (tn != NULL) {
+        tn->last_activity = time(NULL);
+    }
+}
+
+/**
+ * Enable/disable keep-alive functionality
+ */
+void telnet_set_keepalive(telnet_t *tn, bool enabled, int ping_interval, int connection_timeout)
+{
+    if (tn == NULL) {
+        return;
+    }
+
+    tn->keep_alive_enabled = enabled;
+    tn->ping_interval = ping_interval > 0 ? ping_interval : 30;
+    tn->connection_timeout = connection_timeout > 0 ? connection_timeout : 120;
+
+    MB_LOG_INFO("Telnet keep-alive %s: ping_interval=%ds, timeout=%ds",
+               enabled ? "enabled" : "disabled", tn->ping_interval, tn->connection_timeout);
+}
+
+/**
+ * Check connection health and send keep-alive if needed
+ */
+int telnet_check_connection_health(telnet_t *tn)
+{
+    if (tn == NULL || tn->fd < 0) {
+        return ERROR_INVALID_ARG;
+    }
+
+    if (!tn->is_connected || !tn->keep_alive_enabled) {
+        return SUCCESS;
+    }
+
+    time_t now = time(NULL);
+    time_t idle_time = now - tn->last_activity;
+
+    /* Check for connection timeout */
+    if (idle_time > tn->connection_timeout) {
+        MB_LOG_WARNING("Telnet connection timeout: idle for %ld seconds (timeout=%ds)",
+                      idle_time, tn->connection_timeout);
+        tn->has_error = true;
+        return ERROR_CONNECTION;
+    }
+
+    /* Send keep-alive ping if needed */
+    if (now - tn->last_ping >= tn->ping_interval) {
+        MB_LOG_DEBUG("Sending telnet keep-alive ping");
+
+        /* Send NOP as keep-alive (RFC 854) */
+        int result = telnet_send_command(tn, TELNET_NOP);
+        if (result == SUCCESS) {
+            tn->last_ping = now;
+            telnet_update_activity(tn);  /* Update activity for our own ping */
+        } else {
+            MB_LOG_WARNING("Failed to send telnet keep-alive ping");
+            return result;
+        }
+    }
+
+    return SUCCESS;
+}
+
+/**
+ * Reset error counters after successful operation
+ */
+void telnet_reset_error_state(telnet_t *tn)
+{
+    if (tn == NULL) {
+        return;
+    }
+
+    if (tn->consecutive_errors > 0) {
+        MB_LOG_DEBUG("Resetting telnet error state (had %d consecutive errors)",
+                    tn->consecutive_errors);
+    }
+
+    tn->consecutive_errors = 0;
+    tn->last_error_time = 0;
+}
+
+/**
+ * Configure error handling and auto-reconnect settings
+ */
+void telnet_set_error_handling(telnet_t *tn, bool auto_reconnect, int max_consecutive_errors, int reconnect_interval)
+{
+    if (tn == NULL) {
+        return;
+    }
+
+    tn->auto_reconnect = auto_reconnect;
+    tn->max_consecutive_errors = max_consecutive_errors > 0 ? max_consecutive_errors : 3;
+    tn->reconnect_interval = reconnect_interval > 0 ? reconnect_interval : 10;
+
+    MB_LOG_INFO("Telnet error handling: auto_reconnect=%s, max_errors=%d, reconnect_interval=%ds",
+               auto_reconnect ? "enabled" : "disabled", tn->max_consecutive_errors, tn->reconnect_interval);
+}
+
+/**
+ * Handle telnet I/O error with automatic recovery
+ */
+int telnet_handle_error(telnet_t *tn, int error_code, const char *operation)
+{
+    if (tn == NULL || operation == NULL) {
+        return ERROR_INVALID_ARG;
+    }
+
+    tn->consecutive_errors++;
+    tn->last_error_time = time(NULL);
+
+    MB_LOG_WARNING("Telnet %s error #%d: %s (error_code=%d)",
+                  operation, tn->consecutive_errors, strerror(errno), error_code);
+
+    /* Check if we should attempt reconnection */
+    if (tn->auto_reconnect && tn->consecutive_errors >= tn->max_consecutive_errors) {
+        MB_LOG_ERROR("Telnet reached max consecutive errors (%d), marking for reconnection",
+                    tn->max_consecutive_errors);
+        tn->has_error = true;
+        tn->is_connected = false;
+        return ERROR_CONNECTION;
+    }
+
+    /* For temporary errors (EAGAIN, EWOULDBLOCK), don't count as severe */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        tn->consecutive_errors--;  /* Don't count these as real errors */
+        return SUCCESS;  /* These are expected for non-blocking I/O */
+    }
+
+    /* For connection-related errors, mark as disconnected immediately */
+    if (errno == ECONNRESET || errno == EPIPE || errno == ETIMEDOUT) {
+        MB_LOG_ERROR("Telnet connection broken: %s", strerror(errno));
+        tn->is_connected = false;
+        tn->has_error = true;
+        return ERROR_CONNECTION;
+    }
+
+    return error_code;  /* Return the original error for other cases */
+}
+
+/**
+ * Check if reconnection should be attempted
+ */
+bool telnet_should_reconnect(telnet_t *tn)
+{
+    if (tn == NULL) {
+        printf("[TELNET-RECONNECT-DEBUG] tn is NULL, returning false\n");
+        fflush(stdout);
+        return false;
+    }
+
+    printf("[TELNET-RECONNECT-DEBUG] auto_reconnect=%d, is_connected=%d, last_error_time=%ld, consecutive_errors=%d, max_consecutive_errors=%d\n",
+           tn->auto_reconnect, tn->is_connected, (long)tn->last_error_time, tn->consecutive_errors, tn->max_consecutive_errors);
+    fflush(stdout);
+
+    if (!tn->auto_reconnect || tn->is_connected) {
+        printf("[TELNET-RECONNECT-DEBUG] Returning false: auto_reconnect=%d or is_connected=%d\n",
+               tn->auto_reconnect, tn->is_connected);
+        fflush(stdout);
+        return false;
+    }
+
+    time_t now = time(NULL);
+
+    /* Check if enough time has passed since last error/reconnect attempt */
+    if (tn->last_error_time > 0 &&
+        (now - tn->last_error_time) < tn->reconnect_interval) {
+        printf("[TELNET-RECONNECT-DEBUG] Returning false: not enough time passed (now=%ld, last_error_time=%ld, interval=%d)\n",
+               (long)now, (long)tn->last_error_time, tn->reconnect_interval);
+        fflush(stdout);
+        return false;  /* Not enough time has passed */
+    }
+
+    /* Check if we've exceeded the error threshold OR this is the first connection attempt */
+    /* last_error_time == 0 means we haven't tried to connect yet (initial connection) */
+    bool should_reconnect = (tn->last_error_time == 0) || (tn->consecutive_errors >= tn->max_consecutive_errors);
+    printf("[TELNET-RECONNECT-DEBUG] Returning %s: last_error_time=%ld, consecutive_errors=%d >= max=%d\n",
+           should_reconnect ? "TRUE" : "FALSE", (long)tn->last_error_time, tn->consecutive_errors, tn->max_consecutive_errors);
+    fflush(stdout);
+    return should_reconnect;
+}
+
+/* Level 2 Only: Independent UTF-8 implementation */
+
+/**
+ * Check if byte is start of multibyte UTF-8 sequence (Level 2 implementation)
+ */
+static bool is_utf8_start(unsigned char byte)
+{
+    /* UTF-8 start bytes: 11xxxxxx */
+    return (byte & 0xC0) == 0xC0 && (byte & 0xFE) != 0xFE;
+}
+
+/**
+ * Get expected length of UTF-8 sequence from first byte (Level 2 implementation)
+ */
+static int utf8_sequence_length(unsigned char byte)
+{
+    if ((byte & 0x80) == 0x00) {
+        /* 0xxxxxxx - 1 byte (ASCII) */
+        return 1;
+    } else if ((byte & 0xE0) == 0xC0) {
+        /* 110xxxxx - 2 bytes */
+        return 2;
+    } else if ((byte & 0xF0) == 0xE0) {
+        /* 1110xxxx - 3 bytes */
+        return 3;
+    } else if ((byte & 0xF8) == 0xF0) {
+        /* 11110xxx - 4 bytes */
+        return 4;
+    } else {
+        /* Invalid UTF-8 start byte */
+        return 0;
+    }
 }

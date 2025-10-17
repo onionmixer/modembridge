@@ -36,6 +36,11 @@ typedef struct {
     int data_bits;
     int stop_bits;
     flow_control_t flow_control;
+    char modem_init_command[LINE_BUFFER_SIZE];               /* Init commands (with H0) */
+    int modem_autoanswer_mode;                               /* 0=SOFTWARE (S0=0, manual ATA), 1=HARDWARE (S0>0, auto-answer) */
+    char modem_autoanswer_software_command[LINE_BUFFER_SIZE]; /* SOFTWARE mode: "ATE0 S0=0" */
+    char modem_autoanswer_hardware_command[LINE_BUFFER_SIZE]; /* HARDWARE mode: "ATE0 S0=2" */
+    char modem_command[LINE_BUFFER_SIZE];                    /* Health check commands */
 
     /* Telnet settings */
     char telnet_host[SMALL_BUFFER_SIZE];
@@ -49,6 +54,13 @@ typedef struct {
     /* Data logging options */
     bool data_log_enabled;
     char data_log_file[SMALL_BUFFER_SIZE];
+
+    /* Echo functionality options (Level 1) */
+    bool echo_enabled;            /* Enable/disable echo functionality */
+    bool echo_immediate;          /* Immediate echo or buffered mode */
+    int echo_first_delay;         /* Delay before first echo (seconds) */
+    int echo_min_interval;        /* Minimum interval between echoes (seconds) */
+    char echo_prefix[64];         /* Prefix for echo messages */
 } config_t;
 
 /* Function prototypes */
