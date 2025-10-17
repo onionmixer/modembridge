@@ -1315,6 +1315,120 @@ static void bridge_sync_echo_mode(bridge_ctx_t *ctx)
 }
 #endif
 
+/**
+ * Reinitialize modem to initial state
+ * This function is called after connection termination to reset modem
+ * to the same state as program startup
+ */
+static int bridge_reinitialize_modem(bridge_ctx_t *ctx)
+{
+    if (ctx == NULL || !ctx->modem_ready) {
+        return ERROR_INVALID_ARG;
+    }
+
+    MB_LOG_INFO("Reinitializing modem to initial state");
+
+    /* Reinitialize modem structure */
+    modem_init(&ctx->modem, &ctx->serial);
+
+    /* Execute MODEM_INIT_COMMAND if configured */
+    if (ctx->config->modem_init_command[0] != '\0') {
+        char cmd_buf[LINE_BUFFER_SIZE * 2];
+        unsigned char response[SMALL_BUFFER_SIZE];
+
+        MB_LOG_INFO("Executing MODEM_INIT_COMMAND for reinitialization");
+        MB_LOG_DEBUG("Command: %s", ctx->config->modem_init_command);
+
+        /* Process commands separated by semicolons */
+        char *cmd_copy = strdup(ctx->config->modem_init_command);
+        char *token = strtok(cmd_copy, ";");
+
+        while (token != NULL) {
+            /* Skip leading/trailing spaces */
+            while (*token == ' ') token++;
+            char *end = token + strlen(token) - 1;
+            while (end > token && *end == ' ') *end-- = '\0';
+
+            if (*token != '\0') {
+                /* Build command with AT prefix if needed and \r\n suffix */
+                if (strncasecmp(token, "AT", 2) == 0) {
+                    snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", token);
+                } else {
+                    snprintf(cmd_buf, sizeof(cmd_buf), "AT%s\r\n", token);
+                }
+
+                /* Send command to modem */
+                MB_LOG_DEBUG("Sending reinit command: %s", token);
+                ssize_t sent = serial_write(&ctx->serial,
+                                (const unsigned char *)cmd_buf,
+                                strlen(cmd_buf));
+
+                if (sent > 0) {
+                    /* Wait for response */
+                    usleep(200000);  /* 200ms between commands */
+                    ssize_t resp_len = serial_read(&ctx->serial, response, sizeof(response) - 1);
+
+                    if (resp_len > 0) {
+                        response[resp_len] = '\0';
+                        MB_LOG_DEBUG("Reinit response: %.*s", (int)resp_len, response);
+                    }
+                }
+            }
+
+            token = strtok(NULL, ";");
+        }
+
+        free(cmd_copy);
+        MB_LOG_INFO("MODEM_INIT_COMMAND reinitialization completed");
+
+        /* Small delay after initialization */
+        usleep(500000);  /* 500ms */
+    }
+
+    /* Re-apply auto-answer settings */
+    const char *autoanswer_cmd = NULL;
+    const char *mode_name = NULL;
+
+    if (ctx->config->modem_autoanswer_mode == 0) {
+        /* SOFTWARE mode: S0=0, manual ATA required */
+        autoanswer_cmd = ctx->config->modem_autoanswer_software_command;
+        mode_name = "SOFTWARE";
+    } else {
+        /* HARDWARE mode: S0>0, automatic answer */
+        autoanswer_cmd = ctx->config->modem_autoanswer_hardware_command;
+        mode_name = "HARDWARE";
+    }
+
+    if (autoanswer_cmd && autoanswer_cmd[0] != '\0') {
+        char cmd_buf[LINE_BUFFER_SIZE * 2];  /* Double size to prevent truncation */
+
+        /* Build command with AT prefix if needed */
+        if (strncasecmp(autoanswer_cmd, "AT", 2) == 0) {
+            snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", autoanswer_cmd);
+        } else {
+            snprintf(cmd_buf, sizeof(cmd_buf), "AT%s\r\n", autoanswer_cmd);
+        }
+
+        MB_LOG_INFO("Setting auto-answer mode: %s (%s)", mode_name, autoanswer_cmd);
+        ssize_t sent = serial_write(&ctx->serial,
+                        (const unsigned char *)cmd_buf,
+                        strlen(cmd_buf));
+
+        if (sent > 0) {
+            unsigned char response[SMALL_BUFFER_SIZE];
+            usleep(200000);  /* 200ms wait */
+            ssize_t resp_len = serial_read(&ctx->serial, response, sizeof(response) - 1);
+            if (resp_len > 0) {
+                response[resp_len] = '\0';
+                MB_LOG_DEBUG("Auto-answer response: %.*s", (int)resp_len, response);
+            }
+        }
+    }
+
+    MB_LOG_INFO("Modem reinitialization complete - ready for new connections");
+    return SUCCESS;
+}
+
 #ifdef ENABLE_LEVEL2
 /**
  * Handle modem disconnection (Level 2 only)
@@ -1325,10 +1439,9 @@ int bridge_handle_modem_disconnect(bridge_ctx_t *ctx)
         return ERROR_INVALID_ARG;
     }
 
-    MB_LOG_INFO("Modem disconnected");
+    MB_LOG_INFO("Modem disconnected - cleaning up connection");
 
-    
-    /* Disconnect telnet */
+    /* Disconnect telnet if connected */
     if (telnet_is_connected(&ctx->telnet)) {
         telnet_disconnect(&ctx->telnet);
     }
@@ -1336,7 +1449,16 @@ int bridge_handle_modem_disconnect(bridge_ctx_t *ctx)
     /* Send NO CARRIER */
     modem_send_no_carrier(&ctx->modem);
 
+    /* Reinitialize modem to initial state */
+    int ret = bridge_reinitialize_modem(ctx);
+    if (ret != SUCCESS) {
+        MB_LOG_WARNING("Failed to reinitialize modem after modem disconnect: %d", ret);
+        /* Continue anyway - don't fail the disconnect handling */
+    }
+
     ctx->state = STATE_IDLE;
+
+    MB_LOG_INFO("Modem returned to initial state - ready for new connection");
 
     return SUCCESS;
 }
@@ -1366,15 +1488,24 @@ int bridge_handle_telnet_disconnect(bridge_ctx_t *ctx)
         return ERROR_INVALID_ARG;
     }
 
-    MB_LOG_INFO("Telnet disconnected");
+    MB_LOG_INFO("Telnet disconnected - initiating modem reinitialization");
 
-    /* Hang up modem */
+    /* Hang up modem first */
     if (modem_is_online(&ctx->modem)) {
         modem_hangup(&ctx->modem);
         modem_send_no_carrier(&ctx->modem);
     }
 
+    /* Reinitialize modem to initial state */
+    int ret = bridge_reinitialize_modem(ctx);
+    if (ret != SUCCESS) {
+        MB_LOG_WARNING("Failed to reinitialize modem after telnet disconnect: %d", ret);
+        /* Continue anyway - don't fail the disconnect handling */
+    }
+
     ctx->state = STATE_IDLE;
+
+    MB_LOG_INFO("Modem returned to initial state - ready for new connection");
 
     return SUCCESS;
 }

@@ -43,6 +43,105 @@ static int l3_update_direction_priorities(l3_context_t *l3_ctx);
 static long long l3_get_direction_wait_time(l3_context_t *l3_ctx, l3_pipeline_direction_t direction);
 static bool l3_should_force_direction_switch(l3_context_t *l3_ctx, l3_pipeline_direction_t direction);
 
+/* ========== Multibyte Character Handling ========== */
+
+/**
+ * Detect if byte is the start of a multibyte sequence
+ * @param c Byte to check
+ * @return true if multibyte start, false otherwise
+ */
+static bool l3_is_multibyte_start(unsigned char c)
+{
+    /* UTF-8 multibyte start */
+    if ((c & 0xE0) == 0xC0) return true;  /* 2-byte UTF-8 */
+    if ((c & 0xF0) == 0xE0) return true;  /* 3-byte UTF-8 */
+    if ((c & 0xF8) == 0xF0) return true;  /* 4-byte UTF-8 */
+
+    /* EUC-KR/EUC-JP high byte (0xA1-0xFE) */
+    if (c >= 0xA1 && c <= 0xFE) return true;
+
+    /* SHIFT-JIS first byte */
+    if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) return true;
+
+    return false;
+}
+
+/**
+ * Get expected multibyte sequence length
+ * @param c First byte of sequence
+ * @return Expected total length (including first byte)
+ */
+static int l3_get_multibyte_length(unsigned char c)
+{
+    /* UTF-8 */
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+
+    /* EUC-KR/EUC-JP: 2 bytes for hangul/kanji */
+    if (c >= 0xA1 && c <= 0xFE) return 2;
+
+    /* SHIFT-JIS: usually 2 bytes */
+    if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) return 2;
+
+    return 1;  /* Single byte */
+}
+
+/**
+ * Check if multibyte sequence is complete
+ * @param buffer Buffer containing bytes
+ * @param len Current buffer length
+ * @param expected Expected total length
+ * @return true if complete, false otherwise
+ */
+static bool l3_is_multibyte_complete(const unsigned char *buffer, size_t len, int expected)
+{
+    if (len < (size_t)expected) return false;
+
+    /* Additional validation for UTF-8 continuation bytes */
+    unsigned char first = buffer[0];
+    if ((first & 0xE0) == 0xC0 || (first & 0xF0) == 0xE0 || (first & 0xF8) == 0xF0) {
+        for (size_t i = 1; i < len && i < (size_t)expected; i++) {
+            if ((buffer[i] & 0xC0) != 0x80) {
+                return false;  /* Invalid UTF-8 continuation */
+            }
+        }
+    }
+
+    return (len >= (size_t)expected);
+}
+
+/**
+ * Send echo to modem via telnet-to-serial buffer
+ * @param l3_ctx Level 3 context
+ * @param data Data to echo
+ * @param len Length of data
+ * @return Number of bytes echoed
+ */
+static size_t l3_echo_to_modem(l3_context_t *l3_ctx, const unsigned char *data, size_t len)
+{
+    if (!l3_ctx || !data || len == 0) return 0;
+
+    /* Write to telnet-to-serial buffer for echo */
+    size_t written = ts_cbuf_write(&l3_ctx->bridge->ts_telnet_to_serial_buf, data, len);
+
+    if (written > 0) {
+        MB_LOG_DEBUG("Echo to modem: %zu bytes", written);
+
+        /* Debug output for echo content */
+        if (written <= 10) {
+            char hex_str[32];
+            size_t pos = 0;
+            for (size_t i = 0; i < written && pos < sizeof(hex_str)-3; i++) {
+                pos += snprintf(hex_str + pos, sizeof(hex_str) - pos, "%02X ", data[i]);
+            }
+            MB_LOG_DEBUG("Echo bytes: %s", hex_str);
+        }
+    }
+
+    return written;
+}
+
 /* ========== Level 3 Context Management ========== */
 
 /* ========== DCD Event Bridge Functions ========== */
@@ -3329,6 +3428,12 @@ static int l3_process_serial_to_telnet_chunk(l3_context_t *l3_ctx)
     static size_t line_len = 0;
     static time_t line_start_time = 0;
 
+    /* Static multibyte buffer for character assembly */
+    static unsigned char multibyte_buffer[6];  /* Max UTF-8 is 4 bytes, but safety margin */
+    static size_t multibyte_len = 0;
+    static int multibyte_expected = 0;
+    static time_t multibyte_start_time = 0;
+
     /* Read from serial→telnet buffer (populated by modem thread) */
     unsigned char serial_buf[L3_MAX_BURST_SIZE];
     size_t serial_len = ts_cbuf_read(&l3_ctx->bridge->ts_serial_to_telnet_buf,
@@ -3353,7 +3458,19 @@ static int l3_process_serial_to_telnet_chunk(l3_context_t *l3_ctx)
             memset(line_buffer, 0, sizeof(line_buffer));
         }
 
-        /* Process input data byte by byte for line buffering */
+        /* Check for multibyte timeout (1 second) */
+        if (multibyte_len > 0 && (now - multibyte_start_time) > 1) {
+            MB_LOG_DEBUG("Multibyte timeout - echoing incomplete sequence: %zu bytes", multibyte_len);
+            /* Echo incomplete multibyte as-is */
+            l3_echo_to_modem(l3_ctx, multibyte_buffer, multibyte_len);
+
+            /* Reset multibyte state */
+            multibyte_len = 0;
+            multibyte_expected = 0;
+            memset(multibyte_buffer, 0, sizeof(multibyte_buffer));
+        }
+
+        /* Process input data byte by byte for line buffering and echo */
         for (size_t i = 0; i < serial_len; i++) {
             unsigned char c = serial_buf[i];
 
@@ -3361,6 +3478,43 @@ static int l3_process_serial_to_telnet_chunk(l3_context_t *l3_ctx)
             if (line_len == 0) {
                 line_start_time = now;
             }
+
+            /* === Echo handling (immediate for single-byte, after assembly for multibyte) === */
+
+            /* Check if we're in the middle of multibyte assembly */
+            if (multibyte_len > 0) {
+                /* Add to multibyte buffer */
+                if (multibyte_len < sizeof(multibyte_buffer)) {
+                    multibyte_buffer[multibyte_len++] = c;
+                }
+
+                /* Check if multibyte sequence is complete */
+                if (l3_is_multibyte_complete(multibyte_buffer, multibyte_len, multibyte_expected)) {
+                    /* Echo the complete multibyte character */
+                    l3_echo_to_modem(l3_ctx, multibyte_buffer, multibyte_len);
+                    MB_LOG_DEBUG("Echoed multibyte character: %d bytes", multibyte_len);
+
+                    /* Reset multibyte buffer */
+                    multibyte_len = 0;
+                    multibyte_expected = 0;
+                    memset(multibyte_buffer, 0, sizeof(multibyte_buffer));
+                }
+            } else if (l3_is_multibyte_start(c)) {
+                /* Start of new multibyte sequence */
+                multibyte_buffer[0] = c;
+                multibyte_len = 1;
+                multibyte_expected = l3_get_multibyte_length(c);
+                multibyte_start_time = now;  /* Track when multibyte started */
+                MB_LOG_DEBUG("Started multibyte sequence, expecting %d bytes", multibyte_expected);
+            } else {
+                /* Single-byte character - echo immediately */
+                l3_echo_to_modem(l3_ctx, &c, 1);
+
+                /* Note: CR/LF already echoed above as single bytes */
+                /* No need for special newline handling here */
+            }
+
+            /* === Line buffer handling (for telnet transmission) === */
 
             /* Add character to line buffer */
             if (line_len < sizeof(line_buffer) - 1) {
