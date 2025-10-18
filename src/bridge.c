@@ -1315,6 +1315,7 @@ static void bridge_sync_echo_mode(bridge_ctx_t *ctx)
 }
 #endif
 
+#ifdef ENABLE_LEVEL2
 /**
  * Reinitialize modem to initial state
  * This function is called after connection termination to reset modem
@@ -1428,6 +1429,7 @@ static int bridge_reinitialize_modem(bridge_ctx_t *ctx)
     MB_LOG_INFO("Modem reinitialization complete - ready for new connections");
     return SUCCESS;
 }
+#endif
 
 #ifdef ENABLE_LEVEL2
 /**
