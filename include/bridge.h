@@ -19,33 +19,9 @@
 #include "datalog.h"
 #include "timestamp.h"
 #include "echo.h"
+#include "level1_types.h"    /* Level 1 type definitions */
 #include <pthread.h>
 #include <time.h>
-
-
-/* ANSI escape sequence states */
-typedef enum {
-    ANSI_STATE_NORMAL,          /* Normal text */
-    ANSI_STATE_ESC,             /* Received ESC (0x1B) */
-    ANSI_STATE_CSI,             /* Received CSI (ESC [) */
-    ANSI_STATE_CSI_PARAM        /* In CSI parameter sequence */
-} ansi_state_t;
-
-/* Circular buffer for data transfer */
-typedef struct {
-    unsigned char data[BUFFER_SIZE];
-    size_t read_pos;
-    size_t write_pos;
-    size_t count;
-} circular_buffer_t;
-
-/* Thread-safe circular buffer for multithread mode */
-typedef struct {
-    circular_buffer_t cbuf;             /* Underlying circular buffer */
-    pthread_mutex_t mutex;              /* Buffer access synchronization */
-    pthread_cond_t cond_not_empty;      /* Data available signal */
-    pthread_cond_t cond_not_full;       /* Space available signal */
-} ts_circular_buffer_t;
 
 /* Bridge context structure */
 typedef struct {
@@ -136,6 +112,8 @@ typedef struct {
 #endif
 
 } bridge_ctx_t;
+
+#define BRIDGE_CTX_DEFINED
 
 /* Function prototypes */
 

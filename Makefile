@@ -56,12 +56,15 @@ endif
 # Level 1 (serial only) support option
 ifeq ($(ENABLE_LEVEL1), 1)
     CFLAGS += -DENABLE_LEVEL1
+    SOURCES += $(SRC_DIR)/level1_buffer.c $(SRC_DIR)/level1_encoding.c $(SRC_DIR)/level1_serial.c $(SRC_DIR)/level1_thread.c
 endif
 
 # Level 2 (telnet) support option
 ifeq ($(ENABLE_LEVEL2), 1)
     CFLAGS += -DENABLE_LEVEL2
     SOURCES += $(SRC_DIR)/telnet.c $(SRC_DIR)/telnet_thread.c
+    # Level 2 modular components
+    SOURCES += $(SRC_DIR)/level2_thread.c $(SRC_DIR)/level2_connection.c $(SRC_DIR)/level2_transfer.c
 
     # Enable telnet test functionality only in level2 build mode
     ifeq ($(BUILD_MODE), level2)
@@ -73,7 +76,7 @@ endif
 # Level 3 (pipeline management) support option
 ifeq ($(ENABLE_LEVEL3), 1)
     CFLAGS += -DENABLE_LEVEL3
-    SOURCES += $(SRC_DIR)/level3.c
+    SOURCES += $(SRC_DIR)/level3.c $(SRC_DIR)/level3_util.c $(SRC_DIR)/level3_buffer.c $(SRC_DIR)/level3_state.c $(SRC_DIR)/level3_schedule.c
 endif
 
 # Generate object file list from all sources
