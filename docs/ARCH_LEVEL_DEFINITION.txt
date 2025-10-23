@@ -2,6 +2,11 @@
 
 ModemBridge는 멀티스레드 모델로 구현되며, 개발은 다음 세 구간으로 나누어 진행됩니다.
 
+## 관련 문서
+- **아키텍처 설계**: ARCH_MULTITHREAD_ARCHITECTURE.md - 상세 멀티스레드 아키텍처 설계
+- **구현 가이드**: ARCH_IMPLEMENTATION_PLAN.md - 완전한 구현 코드 및 단계별 가이드
+- **데이터 경로 분석**: ARCH_DATA_PATH_REVIEW.md - 멀티바이트 문자 처리 및 데이터 경로 분석
+
 ## Level 1: Client -> Modem -> 서버 Thread1
 
 클라이언트에서 serial port를 통해 데이터를 받아서 연결 및 데이터를 관리하는 구간입니다.

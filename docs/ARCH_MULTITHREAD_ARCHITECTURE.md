@@ -1,5 +1,10 @@
 # ModemBridge 멀티스레드 아키텍처 설계
 
+## 관련 문서
+- **개발 구간 정의**: ARCH_LEVEL_DEFINITION.txt - Level 1/2/3 개요
+- **구현 가이드**: ARCH_IMPLEMENTATION_PLAN.md - 상세 구현 코드
+- **데이터 경로 분석**: ARCH_DATA_PATH_REVIEW.md - 멀티바이트 문자 처리
+
 ## 개요
 
 ModemBridge를 단일 스레드 select() 기반에서 멀티스레드 구조로 변경합니다.
@@ -321,34 +326,14 @@ int bridge_stop(bridge_ctx_t *ctx) {
 
 ## 구현 순서
 
-### Phase 1: Thread-Safe Buffer 구현
-1. `ts_circular_buffer_t` 구조체 정의 (bridge.h)
-2. `ts_cbuf_*` 함수 구현 (bridge.c)
-3. 단위 테스트 작성
+상세한 구현 계획 및 완전한 코드는 `ARCH_IMPLEMENTATION_PLAN.md` 참조.
 
-### Phase 2: Level 1 구현 (Serial/Modem Thread)
-1. `serial_modem_thread_func()` 구현
-2. 기존 `bridge_process_serial_data()` 로직을 스레드 함수로 이식
-3. Mutex로 버퍼 접근 보호
-4. 스레드 생성/종료 로직 추가
-
-### Phase 3: Level 2 구현 (Telnet Thread)
-1. `telnet_thread_func()` 구현
-2. 기존 `bridge_process_telnet_data()` 로직을 스레드 함수로 이식
-3. Mutex로 버퍼 접근 보호
-4. 스레드 생성/종료 로직 추가
-
-### Phase 4: Level 3 통합 및 테스트
-1. Main thread에서 스레드 관리 로직 구현
-2. 상태 동기화 검증
-3. 데드락/레이스 컨디션 테스트
-4. 성능 측정 (latency, throughput)
-
-### Phase 5: 정리 및 최적화
-1. 기존 select() 기반 코드 제거 (`bridge_run()`)
-2. 불필요한 polling 제거 (condition variable 활용)
-3. 문서 업데이트
-4. 코드 리뷰 및 정리
+**구현 단계 요약:**
+- **Phase 1**: Thread-Safe Buffer 구현
+- **Phase 2**: Serial/Modem Thread (Level 1)
+- **Phase 3**: Telnet Thread (Level 2)
+- **Phase 4**: 통합 및 테스트
+- **Phase 5**: 정리 및 최적화
 
 ## 성능 고려사항
 

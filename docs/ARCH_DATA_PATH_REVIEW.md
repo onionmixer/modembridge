@@ -1,5 +1,10 @@
 # Modem-to-Telnet Data Path Multibyte Character Handling Review
 
+## 관련 문서
+- **개발 구간 정의**: ARCH_LEVEL_DEFINITION.txt - Level 1/2/3 개요
+- **아키텍처 설계**: ARCH_MULTITHREAD_ARCHITECTURE.md - 멀티스레드 아키텍처
+- **구현 가이드**: ARCH_IMPLEMENTATION_PLAN.md - 상세 구현 코드
+
 ## 개요
 모뎀(시리얼 포트)에서 받은 데이터를 텔넷 연결로 전달하는 전체 경로를 검토하고, 멀티바이트 문자가 각 단계에서 안전하게 처리되는지 분석합니다.
 

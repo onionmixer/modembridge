@@ -1,5 +1,10 @@
 # ModemBridge 멀티스레드 구현 계획
 
+## 관련 문서
+- **개발 구간 정의**: ARCH_LEVEL_DEFINITION.txt - Level 1/2/3 개요
+- **아키텍처 설계**: ARCH_MULTITHREAD_ARCHITECTURE.md - 멀티스레드 아키텍처 설계
+- **데이터 경로 분석**: ARCH_DATA_PATH_REVIEW.md - 멀티바이트 문자 처리
+
 ## 개요
 
 이 문서는 ModemBridge를 단일 스레드에서 멀티스레드 구조로 변경하기 위한 상세 구현 계획입니다.
@@ -873,8 +878,12 @@ int bridge_run(bridge_ctx_t *ctx)
 - [ ] 주석 업데이트
 
 #### 5.3. 최적화
-- [ ] Critical section 최소화 (mutex lock 시간 단축)
-- [ ] Condition variable 활용 (busy-waiting 제거)
+
+성능 고려사항 및 최적화 방법은 `ARCH_MULTITHREAD_ARCHITECTURE.md`의 "성능 고려사항" 섹션 참조.
+
+**주요 작업 항목:**
+- [ ] Critical section 최소화
+- [ ] Condition variable 활용
 - [ ] Buffer 크기 튜닝
 - [ ] Thread affinity 설정 (선택적)
 
