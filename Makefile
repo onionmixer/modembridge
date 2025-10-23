@@ -56,7 +56,7 @@ endif
 # Level 1 (serial only) support option
 ifeq ($(ENABLE_LEVEL1), 1)
     CFLAGS += -DENABLE_LEVEL1
-    SOURCES += $(SRC_DIR)/level1_buffer.c $(SRC_DIR)/level1_encoding.c $(SRC_DIR)/level1_serial.c
+    SOURCES += $(SRC_DIR)/level1_buffer.c $(SRC_DIR)/level1_encoding.c $(SRC_DIR)/level1_serial.c $(SRC_DIR)/level1_thread.c
 endif
 
 # Level 2 (telnet) support option
