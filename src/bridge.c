@@ -9,6 +9,11 @@
 #include "level1_serial.h"   /* Level 1 serial processing functions */
 #include "level1_thread.h"   /* Level 1 thread functions */
 #endif
+#ifdef ENABLE_LEVEL2
+#include "level2_thread.h"      /* Level 2 telnet thread function */
+#include "level2_connection.h"  /* Level 2 connection management */
+#include "level2_transfer.h"    /* Level 2 data transfer functions */
+#endif
 #include <sys/select.h>
 #include <sys/time.h>
 #include <time.h>
@@ -21,10 +26,7 @@
 #endif
 
 /* Forward declarations */
-#ifdef ENABLE_LEVEL2
-static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx);
-static void bridge_sync_echo_mode(bridge_ctx_t *ctx);
-#endif
+/* Level 2 functions now in level2_*.c modules */
 
 /* ========== Buffer Management Functions (moved to level1_buffer.c) ========== */
 /*
@@ -831,227 +833,21 @@ int bridge_handle_modem_connect(bridge_ctx_t *ctx)
 }
 #endif
 
-#ifdef ENABLE_LEVEL2
-/**
- * Synchronize modem echo with telnet echo mode (Level 2 only)
+/* ========== Level 2 Sync Function (moved to level2_connection.c) ========== */
+/*
+ * bridge_sync_echo_mode() has been moved to level2_connection.c.
+ * It synchronizes echo settings between telnet server and modem client.
  */
-static void bridge_sync_echo_mode(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL || !telnet_is_connected(&ctx->telnet)) {
-        return;
-    }
 
-    /* If server will echo, disable modem local echo to prevent double echo */
-    if (ctx->telnet.remote_options[TELOPT_ECHO]) {
-        if (ctx->modem.settings.echo) {
-            MB_LOG_INFO("Server WILL ECHO - disabling modem local echo to prevent double echo");
-            ctx->modem.settings.echo = false;
-        }
-    }
-    /* If server won't echo, keep modem echo setting (from ATE command) */
-    else {
-        MB_LOG_INFO("Server WONT ECHO - using modem echo setting (ATE command)");
-    }
-}
-#endif
 
-#ifdef ENABLE_LEVEL2
-/**
- * Reinitialize modem to initial state
- * This function is called after connection termination to reset modem
- * to the same state as program startup
+/* ========== Level 2 Connection Functions (moved to level2_connection.c) ========== */
+/*
+ * The following Level 2 connection functions have been moved to level2_connection.c:
+ * - bridge_handle_telnet_connect() - Connection establishment
+ * - bridge_handle_telnet_disconnect() - Disconnection handling
+ * - bridge_sync_echo_mode() - Echo synchronization
+ * - bridge_reinitialize_modem() - Modem reinitialization (internal)
  */
-static int bridge_reinitialize_modem(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL || !ctx->modem_ready) {
-        return ERROR_INVALID_ARG;
-    }
-
-    MB_LOG_INFO("Reinitializing modem to initial state");
-
-    /* Reinitialize modem structure */
-    modem_init(&ctx->modem, &ctx->serial);
-
-    /* Execute MODEM_INIT_COMMAND if configured */
-    if (ctx->config->modem_init_command[0] != '\0') {
-        char cmd_buf[LINE_BUFFER_SIZE * 2];
-        unsigned char response[SMALL_BUFFER_SIZE];
-
-        MB_LOG_INFO("Executing MODEM_INIT_COMMAND for reinitialization");
-        MB_LOG_DEBUG("Command: %s", ctx->config->modem_init_command);
-
-        /* Process commands separated by semicolons */
-        char *cmd_copy = strdup(ctx->config->modem_init_command);
-        char *token = strtok(cmd_copy, ";");
-
-        while (token != NULL) {
-            /* Skip leading/trailing spaces */
-            while (*token == ' ') token++;
-            char *end = token + strlen(token) - 1;
-            while (end > token && *end == ' ') *end-- = '\0';
-
-            if (*token != '\0') {
-                /* Build command with AT prefix if needed and \r\n suffix */
-                if (strncasecmp(token, "AT", 2) == 0) {
-                    snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", token);
-                } else {
-                    snprintf(cmd_buf, sizeof(cmd_buf), "AT%s\r\n", token);
-                }
-
-                /* Send command to modem */
-                MB_LOG_DEBUG("Sending reinit command: %s", token);
-                ssize_t sent = serial_write(&ctx->serial,
-                                (const unsigned char *)cmd_buf,
-                                strlen(cmd_buf));
-
-                if (sent > 0) {
-                    /* Wait for response */
-                    usleep(200000);  /* 200ms between commands */
-                    ssize_t resp_len = serial_read(&ctx->serial, response, sizeof(response) - 1);
-
-                    if (resp_len > 0) {
-                        response[resp_len] = '\0';
-                        MB_LOG_DEBUG("Reinit response: %.*s", (int)resp_len, response);
-                    }
-                }
-            }
-
-            token = strtok(NULL, ";");
-        }
-
-        free(cmd_copy);
-        MB_LOG_INFO("MODEM_INIT_COMMAND reinitialization completed");
-
-        /* Small delay after initialization */
-        usleep(500000);  /* 500ms */
-    }
-
-    /* Re-apply auto-answer settings */
-    const char *autoanswer_cmd = NULL;
-    const char *mode_name = NULL;
-
-    if (ctx->config->modem_autoanswer_mode == 0) {
-        /* SOFTWARE mode: S0=0, manual ATA required */
-        autoanswer_cmd = ctx->config->modem_autoanswer_software_command;
-        mode_name = "SOFTWARE";
-    } else {
-        /* HARDWARE mode: S0>0, automatic answer */
-        autoanswer_cmd = ctx->config->modem_autoanswer_hardware_command;
-        mode_name = "HARDWARE";
-    }
-
-    if (autoanswer_cmd && autoanswer_cmd[0] != '\0') {
-        char cmd_buf[LINE_BUFFER_SIZE * 2];  /* Double size to prevent truncation */
-
-        /* Build command with AT prefix if needed */
-        if (strncasecmp(autoanswer_cmd, "AT", 2) == 0) {
-            snprintf(cmd_buf, sizeof(cmd_buf), "%s\r\n", autoanswer_cmd);
-        } else {
-            snprintf(cmd_buf, sizeof(cmd_buf), "AT%s\r\n", autoanswer_cmd);
-        }
-
-        MB_LOG_INFO("Setting auto-answer mode: %s (%s)", mode_name, autoanswer_cmd);
-        ssize_t sent = serial_write(&ctx->serial,
-                        (const unsigned char *)cmd_buf,
-                        strlen(cmd_buf));
-
-        if (sent > 0) {
-            unsigned char response[SMALL_BUFFER_SIZE];
-            usleep(200000);  /* 200ms wait */
-            ssize_t resp_len = serial_read(&ctx->serial, response, sizeof(response) - 1);
-            if (resp_len > 0) {
-                response[resp_len] = '\0';
-                MB_LOG_DEBUG("Auto-answer response: %.*s", (int)resp_len, response);
-            }
-        }
-    }
-
-    MB_LOG_INFO("Modem reinitialization complete - ready for new connections");
-    return SUCCESS;
-}
-#endif
-
-#ifdef ENABLE_LEVEL2
-/**
- * Handle modem disconnection (Level 2 only)
- */
-int bridge_handle_modem_disconnect(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL) {
-        return ERROR_INVALID_ARG;
-    }
-
-    MB_LOG_INFO("Modem disconnected - cleaning up connection");
-
-    /* Disconnect telnet if connected */
-    if (telnet_is_connected(&ctx->telnet)) {
-        telnet_disconnect(&ctx->telnet);
-    }
-
-    /* Send NO CARRIER */
-    modem_send_no_carrier(&ctx->modem);
-
-    /* Reinitialize modem to initial state */
-    int ret = bridge_reinitialize_modem(ctx);
-    if (ret != SUCCESS) {
-        MB_LOG_WARNING("Failed to reinitialize modem after modem disconnect: %d", ret);
-        /* Continue anyway - don't fail the disconnect handling */
-    }
-
-    ctx->state = STATE_IDLE;
-
-    MB_LOG_INFO("Modem returned to initial state - ready for new connection");
-
-    return SUCCESS;
-}
-
-/**
- * Handle telnet connection establishment (Level 2 only)
- */
-int bridge_handle_telnet_connect(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL) {
-        return ERROR_INVALID_ARG;
-    }
-
-    MB_LOG_INFO("Telnet connection established");
-
-    ctx->state = STATE_CONNECTED;
-
-    return SUCCESS;
-}
-
-/**
- * Handle telnet disconnection (Level 2 only)
- */
-int bridge_handle_telnet_disconnect(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL) {
-        return ERROR_INVALID_ARG;
-    }
-
-    MB_LOG_INFO("Telnet disconnected - initiating modem reinitialization");
-
-    /* Hang up modem first */
-    if (modem_is_online(&ctx->modem)) {
-        modem_hangup(&ctx->modem);
-        modem_send_no_carrier(&ctx->modem);
-    }
-
-    /* Reinitialize modem to initial state */
-    int ret = bridge_reinitialize_modem(ctx);
-    if (ret != SUCCESS) {
-        MB_LOG_WARNING("Failed to reinitialize modem after telnet disconnect: %d", ret);
-        /* Continue anyway - don't fail the disconnect handling */
-    }
-
-    ctx->state = STATE_IDLE;
-
-    MB_LOG_INFO("Modem returned to initial state - ready for new connection");
-
-    return SUCCESS;
-}
-#endif
 
 /* ========== Serial Processing Functions ========== */
 /*
@@ -1270,85 +1066,7 @@ int bridge_process_serial_data_level2(bridge_ctx_t *ctx)
 
     return SUCCESS;
 }
-
-/**
- * Process data from telnet (Level 2 only)
- */
-int bridge_process_telnet_data(bridge_ctx_t *ctx)
-{
-    if (ctx == NULL) {
-        return ERROR_INVALID_ARG;
-    }
-
-    /* Transfer data from telnet to serial */
-    if (telnet_is_connected(&ctx->telnet) && modem_is_online(&ctx->modem)) {
-        return bridge_transfer_telnet_to_serial(ctx);
-    }
-
-    return SUCCESS;
-}
-#endif
-
-#ifdef ENABLE_LEVEL2
-/**
- * Transfer data from telnet to serial (Level 2 only)
- */
-static int bridge_transfer_telnet_to_serial(bridge_ctx_t *ctx)
-{
-    unsigned char telnet_buf[BUFFER_SIZE];
-    unsigned char processed_buf[BUFFER_SIZE];
-    unsigned char output_buf[BUFFER_SIZE];
-    size_t processed_len, output_len;
-    ssize_t n;
-
-    /* Read from telnet */
-    n = telnet_recv(&ctx->telnet, telnet_buf, sizeof(telnet_buf));
-    if (n < 0) {
-        MB_LOG_ERROR("Telnet connection error");
-        bridge_handle_telnet_disconnect(ctx);
-        return ERROR_CONNECTION;
-    }
-
-    if (n == 0) {
-        /* Check if connection closed */
-        if (!telnet_is_connected(&ctx->telnet)) {
-            bridge_handle_telnet_disconnect(ctx);
-            return ERROR_CONNECTION;
-        }
-        return SUCCESS;
-    }
-
-    /* Log data from telnet (raw, before IAC processing) */
-    datalog_write(&ctx->datalog, DATALOG_DIR_FROM_TELNET, telnet_buf, n);
-
-    /* Process telnet protocol (remove IAC sequences) */
-    telnet_process_input(&ctx->telnet, telnet_buf, n,
-                        processed_buf, sizeof(processed_buf), &processed_len);
-
-    if (processed_len == 0) {
-        return SUCCESS;
-    }
-
-    /* Pass through ANSI sequences to modem client */
-    ansi_passthrough_telnet_to_modem(processed_buf, processed_len,
-                                    output_buf, sizeof(output_buf), &output_len);
-
-    if (output_len == 0) {
-        return SUCCESS;
-    }
-
-    /* Log data to modem (after IAC processing, ready to send) */
-    datalog_write(&ctx->datalog, DATALOG_DIR_TO_MODEM, output_buf, output_len);
-
-    /* Send to serial */
-    ssize_t sent = serial_write(&ctx->serial, output_buf, output_len);
-    if (sent > 0) {
-        ctx->bytes_telnet_to_serial += sent;
-    }
-
-    return SUCCESS;
-}
-#endif
+#endif /* ENABLE_LEVEL2 */
 
 /**
  * Main bridge loop (multithread mode)
@@ -1492,155 +1210,12 @@ void *serial_modem_thread_func(void *arg)
 #endif
 
 #ifdef ENABLE_LEVEL2
-/**
- * Telnet thread function - Level 2 only
- * Handles:
- * - Telnet I/O (reading from telnet server)
- * - IAC protocol processing
- * - Telnet → Serial data buffering
- * - Serial → Telnet data transmission
+/* ========== Level 2 Thread Function (moved to level2_thread.c) ========== */
+/*
+ * The telnet_thread_func has been moved to level2_thread.c.
+ * It handles telnet I/O, IAC protocol processing, and bidirectional
+ * data transfer between telnet and serial interfaces.
  */
-void *telnet_thread_func(void *arg)
-{
-    bridge_ctx_t *ctx = (bridge_ctx_t *)arg;
-    unsigned char telnet_buf[BUFFER_SIZE];
-    unsigned char processed_buf[BUFFER_SIZE];
-    unsigned char output_buf[BUFFER_SIZE];
-    unsigned char tx_buf[BUFFER_SIZE];
-
-    MB_LOG_INFO("[Thread 2] Telnet thread started");
-
-    while (ctx->thread_running) {
-        /* Check if telnet is connected or connecting */
-        if (!telnet_is_connected(&ctx->telnet)) {
-            /* Level 3 mode: Connection controlled by state machine, not by this thread */
-            /* But we need to process events for non-blocking connect completion */
-            if (ctx->telnet.is_connecting) {
-                /* Process epoll events to complete non-blocking connection */
-                int result = telnet_process_events(&ctx->telnet, 100);
-                if (result != SUCCESS) {
-                    MB_LOG_ERROR("[Thread 2] Failed to process connection events: %d", result);
-                    telnet_disconnect(&ctx->telnet);
-                }
-                /* Check if connection completed */
-                if (telnet_is_connected(&ctx->telnet)) {
-                    MB_LOG_INFO("[Thread 2] Telnet connection completed");
-                }
-            }
-            usleep(100000);  /* 100ms */
-            continue;
-        }
-
-        /* === Part 1: Telnet → Serial direction === */
-
-        /* Read from telnet */
-        ssize_t n = telnet_recv(&ctx->telnet, telnet_buf, sizeof(telnet_buf));
-
-        if (n < 0) {
-            /* I/O error */
-            MB_LOG_ERROR("[Thread 2] Telnet connection error");
-            telnet_disconnect(&ctx->telnet);
-
-            /* Notify serial thread to hang up modem */
-            pthread_mutex_lock(&ctx->modem_mutex);
-            if (modem_is_online(&ctx->modem)) {
-                modem_hangup(&ctx->modem);
-                modem_send_no_carrier(&ctx->modem);
-            }
-            pthread_mutex_unlock(&ctx->modem_mutex);
-
-            pthread_mutex_lock(&ctx->state_mutex);
-            ctx->state = STATE_IDLE;
-            pthread_mutex_unlock(&ctx->state_mutex);
-
-            continue;
-        }
-
-        if (n == 0) {
-            /* Check if connection closed */
-            if (!telnet_is_connected(&ctx->telnet)) {
-                MB_LOG_INFO("[Thread 2] Telnet disconnected");
-                telnet_disconnect(&ctx->telnet);
-
-                pthread_mutex_lock(&ctx->modem_mutex);
-                if (modem_is_online(&ctx->modem)) {
-                    modem_hangup(&ctx->modem);
-                    modem_send_no_carrier(&ctx->modem);
-                }
-                pthread_mutex_unlock(&ctx->modem_mutex);
-
-                pthread_mutex_lock(&ctx->state_mutex);
-                ctx->state = STATE_IDLE;
-                pthread_mutex_unlock(&ctx->state_mutex);
-            }
-            usleep(1000);
-            continue;
-        }
-
-        if (n > 0) {
-            /* Log data from telnet */
-            datalog_write(&ctx->datalog, DATALOG_DIR_FROM_TELNET, telnet_buf, n);
-
-            /* Process telnet protocol (remove IAC) */
-            size_t processed_len;
-            telnet_process_input(&ctx->telnet, telnet_buf, n,
-                                processed_buf, sizeof(processed_buf), &processed_len);
-
-            if (processed_len > 0) {
-                /* Pass through ANSI sequences to modem client */
-                size_t output_len;
-                ansi_passthrough_telnet_to_modem(processed_buf, processed_len,
-                                                output_buf, sizeof(output_buf), &output_len);
-
-                if (output_len > 0) {
-                    /* Write to telnet→serial buffer */
-                    ts_cbuf_write(&ctx->ts_telnet_to_serial_buf,
-                                 output_buf, output_len);
-                }
-            }
-        }
-
-        /* === Part 2: Serial → Telnet direction === */
-
-        /* Check if Level 3 is handling this direction */
-        bool level3_handles_serial_to_telnet = false;
-#ifdef ENABLE_LEVEL3
-        if (ctx->level3_enabled) {
-            /* If Level 3 is enabled at all, it handles the buffers */
-            level3_handles_serial_to_telnet = true;
-
-            /* DEBUG: Log Level 3 handling status periodically */
-            static int log_count = 0;
-            if (++log_count % 1000 == 0) {
-                if (ctx->level3 != NULL) {
-                    l3_context_t *l3_ctx = (l3_context_t*)ctx->level3;
-                    printf("[DEBUG-TELNET-THREAD] Level 3 enabled: active=%d, state=%d\n",
-                           l3_ctx->level3_active, l3_ctx->system_state);
-                    fflush(stdout);
-                }
-            }
-        }
-#endif
-
-        /* Level 2 mode: Read from serial→telnet buffer and send (ONLY if Level 3 not enabled) */
-        if (!level3_handles_serial_to_telnet) {
-            size_t tx_len = ts_cbuf_read(&ctx->ts_serial_to_telnet_buf, tx_buf, sizeof(tx_buf));
-            if (tx_len > 0) {
-                /* Log data to telnet */
-                datalog_write(&ctx->datalog, DATALOG_DIR_TO_TELNET, tx_buf, tx_len);
-
-                /* Send to telnet server */
-                telnet_send(&ctx->telnet, tx_buf, tx_len);
-            }
-        }
-
-        /* Short sleep to avoid busy-waiting */
-        usleep(10000);  /* 10ms - reduced frequency to avoid excessive polling */
-    }
-
-    MB_LOG_INFO("[Thread 2] Telnet thread exiting");
-    return NULL;
-}
 #endif
 
 /* ========== Level 3 Integration ========== */

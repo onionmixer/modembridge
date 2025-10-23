@@ -63,6 +63,8 @@ endif
 ifeq ($(ENABLE_LEVEL2), 1)
     CFLAGS += -DENABLE_LEVEL2
     SOURCES += $(SRC_DIR)/telnet.c $(SRC_DIR)/telnet_thread.c
+    # Level 2 modular components
+    SOURCES += $(SRC_DIR)/level2_thread.c $(SRC_DIR)/level2_connection.c $(SRC_DIR)/level2_transfer.c
 
     # Enable telnet test functionality only in level2 build mode
     ifeq ($(BUILD_MODE), level2)
