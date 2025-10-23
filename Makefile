@@ -56,6 +56,7 @@ endif
 # Level 1 (serial only) support option
 ifeq ($(ENABLE_LEVEL1), 1)
     CFLAGS += -DENABLE_LEVEL1
+    SOURCES += $(SRC_DIR)/level1_buffer.c $(SRC_DIR)/level1_encoding.c $(SRC_DIR)/level1_serial.c
 endif
 
 # Level 2 (telnet) support option
@@ -73,7 +74,7 @@ endif
 # Level 3 (pipeline management) support option
 ifeq ($(ENABLE_LEVEL3), 1)
     CFLAGS += -DENABLE_LEVEL3
-    SOURCES += $(SRC_DIR)/level3.c
+    SOURCES += $(SRC_DIR)/level3.c $(SRC_DIR)/level3_util.c $(SRC_DIR)/level3_buffer.c $(SRC_DIR)/level3_state.c $(SRC_DIR)/level3_schedule.c
 endif
 
 # Generate object file list from all sources

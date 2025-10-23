@@ -23,94 +23,22 @@
 #include "telnet.h"
 #include "bridge.h"
 #include "util.h"
+#include "level3_types.h"  /* All type definitions for Level 3 */
 #include <pthread.h>
 #include <time.h>
 #include <stdbool.h>
 
-/* Level 3 Pipeline Configuration - Using common utility constants */
+/* Override buffer size to use UTIL constants if needed */
+#ifdef UTIL_MAX_MESSAGE_LEN
+#undef L3_PIPELINE_BUFFER_SIZE
+#undef L3_MAX_BURST_SIZE
 #define L3_PIPELINE_BUFFER_SIZE        UTIL_MAX_MESSAGE_LEN      /* Using common buffer size */
 #define L3_MAX_BURST_SIZE             UTIL_MAX_MESSAGE_LEN       /* Using common message size */
-#define L3_FAIRNESS_TIME_SLICE_MS     50                          /* Time slice per pipeline (ms) */
-#define L3_BACKPRESSURE_TIMEOUT_MS    5000                        /* Backpressure timeout (ms) */
+#endif
 
-/* Level 3 State Machine Timeouts */
-#define LEVEL3_CONNECT_TIMEOUT        30                          /* Connection timeout (seconds) */
-#define LEVEL3_SHUTDOWN_TIMEOUT       10                          /* Shutdown timeout (seconds) */
-#define LEVEL3_INIT_TIMEOUT           15                          /* Initialization timeout (seconds) */
+/* Type definitions have been moved to level3_types.h */
 
-/* Enhanced Backpressure Watermarks - BACKPRESSURE.txt Compliant */
-#define L3_CRITICAL_WATERMARK         (L3_PIPELINE_BUFFER_SIZE * 0.95)  /* 95% - Emergency stop */
-#define L3_HIGH_WATERMARK             (L3_PIPELINE_BUFFER_SIZE * 0.80)  /* 80% - Apply backpressure */
-#define L3_LOW_WATERMARK              (L3_PIPELINE_BUFFER_SIZE * 0.20)  /* 20% - Release backpressure */
-#define L3_EMPTY_WATERMARK            (L3_PIPELINE_BUFFER_SIZE * 0.05)  /* 5% - Buffer empty */
-
-/* Pipeline Directions */
-typedef enum {
-    L3_PIPELINE_SERIAL_TO_TELNET = 1,    /* Pipeline 1: Serial → Telnet */
-    L3_PIPELINE_TELNET_TO_SERIAL = 2     /* Pipeline 2: Telnet → Serial */
-} l3_pipeline_direction_t;
-
-/* Legacy direction type for backward compatibility */
-typedef l3_pipeline_direction_t l3_direction_t;
-
-/* Number of pipeline directions */
-#define LEVEL3_DIRECTION_COUNT 3          /* Total number of directions (1-based enum + 1) */
-
-/* Enhanced Level 3 System States - LEVEL3_WORK_TODO.txt Compliant */
-typedef enum {
-    /* Initial System States */
-    L3_STATE_UNINITIALIZED = 0,          /* System not initialized */
-    L3_STATE_INITIALIZING,               /* Initialization in progress */
-
-    /* Connection/Ready States */
-    L3_STATE_READY,                      /* Ready for connection (command mode) */
-    L3_STATE_CONNECTING,                 /* Establishing connection */
-    L3_STATE_NEGOTIATING,                /* Protocol negotiation active */
-
-    /* Active Data Transfer States */
-    L3_STATE_DATA_TRANSFER,              /* Active data transfer (online mode) */
-    L3_STATE_FLUSHING,                   /* Flushing pending data */
-
-    /* Shutdown/Termination States */
-    L3_STATE_SHUTTING_DOWN,              /* Graceful shutdown in progress */
-    L3_STATE_TERMINATED,                 /* System terminated */
-    L3_STATE_ERROR                       /* Error state requiring recovery */
-} l3_system_state_t;
-
-/* Level 3 Result Codes - Compatible with util_result_t */
-typedef enum {
-    L3_SUCCESS = 0,                     /* Success */
-    L3_ERROR_FAILURE = -1,               /* General failure */
-    L3_ERROR_INVALID_PARAM = -2,         /* Invalid parameter */
-    L3_ERROR_TIMEOUT = -3,               /* Timeout occurred */
-    L3_ERROR_BUFFER_FULL = -4,           /* Buffer is full */
-    L3_ERROR_INVALID_STATE = -5,         /* Invalid state transition */
-    L3_ERROR_BUSY = -6,                  /* Resource busy */
-    L3_ERROR_MEMORY = -7,                /* Memory allocation failed */
-    L3_ERROR_IO = -8,                    /* I/O error */
-    L3_ERROR_THREAD = -9,                /* Thread error */
-    L3_ERROR_QUEUE_FULL = -10,           /* Queue is full */
-    L3_ERROR_NO_VIOLATION = -11          /* No latency violation detected */
-} l3_result_t;
-
-/* Level 3 Special Return Values */
-#define L3_QUANTUM_EXPIRED        1       /* Quantum time slice expired */
-
-/* Legacy Pipeline States (for backward compatibility) */
-typedef enum {
-    L3_PIPELINE_STATE_IDLE = 0,          /* No active data transfer */
-    L3_PIPELINE_STATE_ACTIVE,            /* Currently processing data */
-    L3_PIPELINE_STATE_BLOCKED,           /* Blocked by backpressure */
-    L3_PIPELINE_STATE_ERROR              /* Error condition */
-} l3_pipeline_state_t;
-
-/* Hayes Command Types */
-typedef enum {
-    HAYES_CMD_BASIC = 0,                 /* Basic AT command (ATE, ATH, etc.) */
-    HAYES_CMD_EXTENDED,                  /* Extended AT& command */
-    HAYES_CMD_REGISTER,                  /* S-register command (ATS) */
-    HAYES_CMD_PROPRIETARY                /* Vendor-specific command */
-} hayes_command_type_t;
+/* Struct definitions that are too complex to move to level3_types.h remain here */
 
 /* Hayes Command Entry */
 typedef struct {
@@ -137,17 +65,6 @@ typedef struct {
     size_t num_results;                      /* Number of result codes */
 } hayes_dictionary_t;
 
-/* Hayes Command Filter State */
-typedef enum {
-    HAYES_STATE_NORMAL = 0,              /* Normal data mode */
-    HAYES_STATE_ESCAPE,                  /* Received ESC (0x1B) */
-    HAYES_STATE_PLUS_ESCAPE,             /* Detecting +++ escape sequence */
-    HAYES_STATE_COMMAND,                 /* In AT command mode */
-    HAYES_STATE_RESULT,                  /* Processing result code */
-    HAYES_STATE_CR_WAIT,                 /* Waiting for CR after command */
-    HAYES_STATE_LF_WAIT                  /* Waiting for LF after CR */
-} hayes_filter_state_t;
-
 /* Hayes Filter Context */
 typedef struct {
     hayes_filter_state_t state;          /* Current filter state */
@@ -168,17 +85,7 @@ typedef struct {
     const hayes_dictionary_t *dict;      /* Command dictionary reference */
 } hayes_filter_context_t;
 
-/* TELNET Control Code Filter State */
-typedef enum {
-    TELNET_FILTER_STATE_DATA = 0,        /* Normal data */
-    TELNET_FILTER_STATE_IAC,             /* Received IAC (0xFF) */
-    TELNET_FILTER_STATE_WILL,            /* WILL option */
-    TELNET_FILTER_STATE_WONT,            /* WONT option */
-    TELNET_FILTER_STATE_DO,              /* DO option */
-    TELNET_FILTER_STATE_DONT,            /* DONT option */
-    TELNET_FILTER_STATE_SB,              /* Suboption begin */
-    TELNET_FILTER_STATE_SB_DATA          /* Suboption data */
-} telnet_filter_state_t;
+/* TELNET filter state is defined in level3_types.h */
 
 /* Double Buffer Structure for Each Pipeline */
 typedef struct {
@@ -432,16 +339,12 @@ typedef struct {
 
 } l3_context_t;
 
+/* Include state machine functions after l3_context_t is defined */
+#include "level3_state.h"
+
 /* Enhanced Buffer Management - LEVEL3_WORK_TODO.txt Compliant */
 
-/* Buffer Watermark Levels */
-typedef enum {
-    L3_WATERMARK_CRITICAL = 0,      /* Buffer almost full (>95%) */
-    L3_WATERMARK_HIGH = 1,          /* High water mark (>80%) */
-    L3_WATERMARK_NORMAL = 2,        /* Normal range (20-80%) */
-    L3_WATERMARK_LOW = 3,           /* Low water mark (<20%) */
-    L3_WATERMARK_EMPTY = 4          /* Buffer empty (<5%) */
-} l3_watermark_level_t;
+/* Buffer Watermark Levels defined in level3_types.h */
 
 /* Enhanced Buffer Metrics */
 typedef struct {
@@ -564,79 +467,13 @@ typedef struct {
 /* ===== DCD Event Bridge Functions ===== */
 
 /**
- * Handle DCD rising edge event - activates pipeline when ready
- * @param l3_ctx Level 3 context
- * @return L3_SUCCESS on success, l3_result_t error code on failure
- */
-l3_result_t l3_on_dcd_rising(l3_context_t *l3_ctx);
-
-/**
- * Handle DCD falling edge event - triggers graceful shutdown
- * @param l3_ctx Level 3 context
- * @return L3_SUCCESS on success, l3_result_t error code on failure
- */
-l3_result_t l3_on_dcd_falling(l3_context_t *l3_ctx);
-
-/**
- * Get current DCD state
- * @param l3_ctx Level 3 context
- * @return true if DCD is high, false otherwise
- */
-bool l3_get_dcd_state(l3_context_t *l3_ctx);
-
-/**
  * Initialize DCD monitoring for Level 3
  * @param l3_ctx Level 3 context
  * @return L3_SUCCESS on success, l3_result_t error code on failure
  */
 l3_result_t l3_init_dcd_monitoring(l3_context_t *l3_ctx);
 
-/* ===== Enhanced State Machine Functions ===== */
-
-/**
- * Get system state as human-readable string
- * @param state Level 3 system state
- * @return String representation of state
- */
-const char *l3_system_state_to_string(l3_system_state_t state);
-
-/**
- * Set system state with validation and logging
- * @param l3_ctx Level 3 context
- * @param new_state Target state
- * @param timeout_seconds Timeout for new state (0 = no timeout)
- * @return L3_SUCCESS on success, l3_result_t error code on failure
- */
-l3_result_t l3_set_system_state(l3_context_t *l3_ctx, l3_system_state_t new_state, int timeout_seconds);
-
-/**
- * Check if state transition is valid
- * @param from_state Source state
- * @param to_state Target state
- * @return true if transition is valid, false otherwise
- */
-bool l3_is_valid_state_transition(l3_system_state_t from_state, l3_system_state_t to_state);
-
-/**
- * Process current state and handle automatic transitions
- * @param l3_ctx Level 3 context
- * @return L3_SUCCESS on success, l3_result_t error code on failure
- */
-l3_result_t l3_process_state_machine(l3_context_t *l3_ctx);
-
-/**
- * Handle state timeout
- * @param l3_ctx Level 3 context
- * @return L3_SUCCESS on success, l3_result_t error code on failure
- */
-l3_result_t l3_handle_state_timeout(l3_context_t *l3_ctx);
-
-/**
- * Check if current state has timed out
- * @param l3_ctx Level 3 context
- * @return true if state has timed out, false otherwise
- */
-bool l3_is_state_timed_out(l3_context_t *l3_ctx);
+/* State machine functions are now in level3_state.h */
 
 /* Level 3 Context Management */
 /**
