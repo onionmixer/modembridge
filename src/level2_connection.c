@@ -144,7 +144,7 @@ static int bridge_reinitialize_modem(bridge_ctx_t *ctx)
     modem_init(&ctx->modem, &ctx->serial);
 
     /* Send initialization command if configured */
-    if (ctx->config->modem_init_command && strlen(ctx->config->modem_init_command) > 0) {
+    if (ctx->config->modem_init_command[0] != '\0') {
         MB_LOG_INFO("Sending modem init command: %s", ctx->config->modem_init_command);
         char cmd_buf[1056];  /* MAX_CONFIG_LINE_LENGTH + extra space for \r */
         snprintf(cmd_buf, sizeof(cmd_buf), "%s\r", ctx->config->modem_init_command);
@@ -153,7 +153,7 @@ static int bridge_reinitialize_modem(bridge_ctx_t *ctx)
     }
 
     /* Send MODEM_COMMAND if configured */
-    if (ctx->config->modem_command && strlen(ctx->config->modem_command) > 0) {
+    if (ctx->config->modem_command[0] != '\0') {
         MB_LOG_INFO("Sending MODEM_COMMAND for reinitialization: %s", ctx->config->modem_command);
         char cmd_buf[1056];  /* MAX_CONFIG_LINE_LENGTH + extra space for \r */
         snprintf(cmd_buf, sizeof(cmd_buf), "%s\r", ctx->config->modem_command);
